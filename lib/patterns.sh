@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# patterns.sh — the entire detection ruleset for skill-checker, in plain sight.
+# patterns.sh — the entire detection ruleset for skill-screen, in plain sight.
 #
-# This is the transparency promise of skill-checker: every rule that can flag a
+# This is the transparency promise of skill-screen: every rule that can flag a
 # skill lives here, as a readable POSIX extended-regex (ERE). There is no hidden
 # model and no remote service in the mechanical stage. Read it, audit it, fork it.
 #
@@ -23,7 +23,7 @@
 #     screen you can fully read beats a sprawling list you can't.
 
 # Bump when the pattern set changes (recorded in scan output; used for re-check logic).
-# v1 (skill-checker initial): EN blocked 3 + EN warning 5 + JP warning 4
+# v1 (skill-screen initial): EN blocked 3 + EN warning 5 + JP warning 4
 patterns::schema_version() { echo "1"; }
 
 # BLOCKED — install-blocking. Classic prompt-injection / remote code execution.

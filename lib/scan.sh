@@ -138,7 +138,7 @@ _skc_emit_json() {
       --arg ch "$chash" --argjson fs "${files:-0}" --argjson pc "${pcount:-0}" \
       --arg sig "$signal" --argjson hits "$hits_json" --argjson secrets "$secret_json" \
       --arg ts "$ts" \
-      '{schema_version:$sv, tool:"skill-checker", target_dir:$td, profile:$prof,
+      '{schema_version:$sv, tool:"skill-screen", target_dir:$td, profile:$prof,
         content_hash:$ch, files_scanned:$fs, pattern_count:$pc,
         candidate_signal:$sig, hits:$hits, secret_hits:$secrets, scanned_at:$ts}'
   else
@@ -151,7 +151,7 @@ _skc_emit_json() {
     # target_dir is operator-controlled; escape \ and " and drop control chars so a
     # crafted directory name cannot break the JSON in this hand-built path.
     dir_esc="$(printf '%s' "$dir" | tr -d '\000-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
-    printf '{"schema_version":"%s","tool":"skill-checker","target_dir":"%s",' \
+    printf '{"schema_version":"%s","tool":"skill-screen","target_dir":"%s",' \
       "$(patterns::schema_version)" "$dir_esc"
     printf '"profile":"%s","content_hash":"%s","files_scanned":%s,"pattern_count":%s,' \
       "$profile" "$chash" "${files:-0}" "${pcount:-0}"

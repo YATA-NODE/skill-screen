@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# skill-check — stage-1 entry point for skill-checker.
+# skill-screen — stage-1 entry point for skill-screen.
 #
 # Walks a skill/extension directory, runs the readable grep ruleset, and prints a
 # verdict. This is the MECHANICAL stage only: it surfaces candidates. For intent,
@@ -22,10 +22,10 @@ _lib="$_root/lib"
 
 usage() {
   cat <<'EOF'
-skill-check — local, transparent pre-install screen for agent skills.
+skill-screen — local, transparent pre-install screen for agent skills.
 
 Usage:
-  skill-check --target <dir> [options]
+  skill-screen --target <dir> [options]
 
 Options:
   --target <dir>        Directory of the skill/extension to screen (required).
@@ -43,7 +43,7 @@ EOF
 target="" ; profile="auto" ; with_jp=0 ; secret=0 ; want_json=0
 quarantine=0 ; quarantine_dir=""
 
-need_val() { [ "$1" -ge 2 ] || { printf 'skill-check: %s requires a value\n' "$2" >&2; exit 3; }; }
+need_val() { [ "$1" -ge 2 ] || { printf 'skill-screen: %s requires a value\n' "$2" >&2; exit 3; }; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --target) need_val "$#" --target; target="$2"; shift 2 ;;
@@ -56,17 +56,17 @@ while [ $# -gt 0 ]; do
     --quarantine=*) quarantine=1; quarantine_dir="${1#*=}"; shift ;;
     --json) want_json=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    *) printf 'skill-check: unknown argument: %s\n' "$1" >&2; usage >&2; exit 3 ;;
+    *) printf 'skill-screen: unknown argument: %s\n' "$1" >&2; usage >&2; exit 3 ;;
   esac
 done
 
 if [ -z "$target" ]; then
-  printf 'skill-check: --target <dir> is required\n' >&2; usage >&2; exit 3
+  printf 'skill-screen: --target <dir> is required\n' >&2; usage >&2; exit 3
 fi
 
 case "$profile" in
   auto|claude-code-skill|codex-extension|generic) ;;
-  *) printf 'skill-check: invalid --profile: %s\n' "$profile" >&2; exit 3 ;;
+  *) printf 'skill-screen: invalid --profile: %s\n' "$profile" >&2; exit 3 ;;
 esac
 [ "$profile" = "auto" ] && profile="$(profiles::detect "$target")"
 
@@ -86,7 +86,7 @@ if [ "$quarantine" = 1 ] && [ "$signal" != "no_signal" ] && [ "$signal" != "scan
     printf 'quarantined: moved to %s\n' "$dest" >&2
     printf 'NOTE: quarantine is a heuristic action, not proof of malice. Review before deleting.\n' >&2
   else
-    printf 'skill-check: quarantine move failed (left target in place)\n' >&2
+    printf 'skill-screen: quarantine move failed (left target in place)\n' >&2
   fi
 fi
 
@@ -94,7 +94,7 @@ fi
 if [ "$want_json" = 1 ]; then
   cat "$json_out"
 else
-  printf 'skill-check  profile=%s  verdict=%s\n' "$profile" "$signal"
+  printf 'skill-screen  profile=%s  verdict=%s\n' "$profile" "$signal"
   case "$signal" in
     no_signal)      printf '  No rule matched. This is NOT a proof of safety.\n' ;;
     review_needed)  printf '  Warning-level matches. Read them before installing:\n' ;;

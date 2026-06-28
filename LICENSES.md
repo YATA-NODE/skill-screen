@@ -1,6 +1,6 @@
 # Third-party licenses
 
-`skill-checker` bundles **no third-party code**. The repository ships only its own
+`skill-screen` bundles **no third-party code**. The repository ships only its own
 source (`bin/`, `lib/`, `prompts/`, `corpus/`, `tests/`), licensed under MIT
 (see [LICENSE](LICENSE)).
 

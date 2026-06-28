@@ -1,6 +1,6 @@
-# skill-checker — Stage 2 interpretation prompt
+# skill-screen — Stage 2 interpretation prompt
 
-Stage 1 (`bin/skill-check`) is a high-recall mechanical grep. It flags **candidates**;
+Stage 1 (`bin/skill-screen`) is a high-recall mechanical grep. It flags **candidates**;
 it does not decide intent. This prompt is Stage 2: it asks a model (or you) to separate
 **true positives** (the skill actually tries to do something harmful) from **false
 positives** (the skill merely *documents*, *detects*, or *defends against* such things).

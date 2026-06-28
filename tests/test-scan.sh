@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # test-scan.sh — dry-run validation of the Stage 1 scanner against the labeled corpus.
 #
-# Asserts, for every row in corpus/EXPECTED.tsv, that skill-check's candidate_signal
+# Asserts, for every row in corpus/EXPECTED.tsv, that skill-screen's candidate_signal
 # matches the expected value. Also checks content_hash stability and scan-error.
 #
 # Exit 0 = all pass, 1 = at least one failure.
 set -u
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-check="$root/bin/skill-check"
+check="$root/bin/skill-screen"
 expected="$root/corpus/EXPECTED.tsv"
 
 # field_of <json_file> <key> -> string value of a top-level scalar key

@@ -1,4 +1,4 @@
-# skill-checker
+# skill-screen
 
 A **local, transparent** pre-install safety screen for third-party AI agent skills
 (Claude Code skills, Codex extensions).
@@ -14,7 +14,7 @@ trusting its `SKILL.md` and scripts with whatever your agent can do. Official
 marketplaces screen their own listings, but **there is no built-in check for a
 skill you install yourself**.
 
-`skill-checker` fills that gap with two deliberate properties:
+`skill-screen` fills that gap with two deliberate properties:
 
 - **Local-complete** — it never sends your skill anywhere. Everything runs on your
   machine. No account, no upload, no telemetry.
@@ -26,7 +26,7 @@ read every rule, and nothing leaves your laptop.
 
 ## How it works — inspection and interpretation are separate
 
-1. **Stage 1 (mechanical, `grep`)** — `bin/skill-check` walks the skill directory and
+1. **Stage 1 (mechanical, `grep`)** — `bin/skill-screen` walks the skill directory and
    matches a fixed, readable set of prompt-injection / risky-behavior patterns. It
    emits a machine-readable JSON verdict. High recall by design (it flags candidates;
    it does not decide intent).
@@ -46,9 +46,9 @@ read every rule, and nothing leaves your laptop.
 ## Usage
 
 ```sh
-bin/skill-check --target /path/to/some-skill            # human-readable verdict
-bin/skill-check --target /path/to/some-skill --json     # machine-readable JSON
-bin/skill-check --target ./suspect --quarantine         # move flagged skill aside
+bin/skill-screen --target /path/to/some-skill            # human-readable verdict
+bin/skill-screen --target /path/to/some-skill --json     # machine-readable JSON
+bin/skill-screen --target ./suspect --quarantine         # move flagged skill aside
 ```
 
 Requirements: `bash`, `grep`, `sha256sum`. `jq` is used for clean JSON output; without
@@ -56,7 +56,7 @@ it the tool degrades safely.
 
 ## Limitations (read these)
 
-`skill-checker` is a screen, not a proof. Known boundaries by design:
+`skill-screen` is a screen, not a proof. Known boundaries by design:
 
 - **`no_signal` is not "safe."** It means no rule matched what was scanned.
 - **Binary files are hashed but not pattern-scanned.** A payload hidden in a binary
