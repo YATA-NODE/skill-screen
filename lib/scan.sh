@@ -232,7 +232,7 @@ scan::run() {
         [ -z "$m" ] && continue
         line="${m%%:*}"; content="${m#*:}"
         excerpt="$(_skc_sanitize "$content")"
-        role="$(profiles::role "$rel" "$profile")"
+        role="$(profiles::role "$rel")"
         printf '%s\037%s\037%s\037%s\037%s\037%s\n' \
           "$category" "$severity" "$rel" "$line" "$role" "$excerpt" >> "$hits_tmp"
       done

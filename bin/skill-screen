@@ -29,7 +29,7 @@ Usage:
 
 Options:
   --target <dir>        Directory of the skill/extension to screen (required).
-  --profile <name>      auto (default) | agent-skill | codex-config | generic
+  --profile <name>      auto (default) | agent-skill | generic
   --with-jp             Also apply the Japanese warning patterns.
   --include-secret-scan Also scan for shipped credentials (masked in output).
   --quarantine[=<dir>]  If flagged, move the target aside (default: ./quarantine/).
@@ -65,7 +65,7 @@ if [ -z "$target" ]; then
 fi
 
 case "$profile" in
-  auto|agent-skill|codex-config|generic) ;;
+  auto|agent-skill|generic) ;;
   *) printf 'skill-screen: invalid --profile: %s\n' "$profile" >&2; exit 3 ;;
 esac
 [ "$profile" = "auto" ] && profile="$(profiles::detect "$target")"
