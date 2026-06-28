@@ -9,24 +9,33 @@
 #
 # Source-only.
 #
-# Supported profiles:
-#   claude-code-skill : a Claude Code skill (has SKILL.md at the top level)
-#   codex-extension   : a Codex CLI extension/prompt (AGENTS.md or config.toml, no SKILL.md)
-#   generic           : anything else — scan everything, classify by extension only
+# Supported profiles (they only label files and drive auto-detection — they never
+# change WHICH files are scanned; "scan superset" is a safety invariant):
+#   agent-skill  : an agent skill — has SKILL.md at the top level. SKILL.md is the
+#                  open agent skills spec used by BOTH Claude Code and OpenAI Codex,
+#                  so the same profile covers a skill from either tool.
+#   codex-config : Codex custom instructions / config — AGENTS.md, AGENTS.override.md,
+#                  config.toml, or .codex/config.toml, and no SKILL.md. AGENTS.md is a
+#                  custom *instructions* file, NOT a skill (see OpenAI Codex docs), but
+#                  an agent reads it, so it is still worth screening.
+#   generic      : anything else — scan everything, classify by extension only.
 #
-# The codex-extension layout is detected loosely on purpose; until its spec is
-# pinned down we fall back to generic behavior (scan all, conservative), which is
-# the safe side.
+# codex-config is detected loosely on purpose; we scan everything regardless, so an
+# imperfect label never narrows the scan (the safe side).
 
-# profiles::detect <dir> -> prints one of: claude-code-skill | codex-extension | generic
+# profiles::detect <dir> -> prints one of: agent-skill | codex-config | generic
 profiles::detect() {
   local dir="$1"
   [ -d "$dir" ] || { echo "generic"; return 0; }
+  # SKILL.md = the open agent skills spec, shared by Claude Code and OpenAI Codex.
   if [ -f "$dir/SKILL.md" ]; then
-    echo "claude-code-skill"; return 0
+    echo "agent-skill"; return 0
   fi
-  if [ -f "$dir/AGENTS.md" ] || [ -f "$dir/config.toml" ] || [ -f "$dir/.codex/config.toml" ]; then
-    echo "codex-extension"; return 0
+  # AGENTS.md / AGENTS.override.md = Codex custom instructions; config.toml /
+  # .codex/config.toml = Codex config. None is a skill, but worth screening.
+  if [ -f "$dir/AGENTS.md" ] || [ -f "$dir/AGENTS.override.md" ] \
+     || [ -f "$dir/config.toml" ] || [ -f "$dir/.codex/config.toml" ]; then
+    echo "codex-config"; return 0
   fi
   echo "generic"
 }
@@ -41,16 +50,16 @@ profiles::role() {
       echo "executable"; return 0 ;;
   esac
   case "$profile" in
-    claude-code-skill)
+    agent-skill)
       case "$base" in
         SKILL.md) echo "instruction"; return 0 ;;
       esac
       case "$rel" in
         *.md|*.txt) echo "instruction"; return 0 ;;
       esac ;;
-    codex-extension)
+    codex-config)
       case "$base" in
-        AGENTS.md|config.toml) echo "instruction"; return 0 ;;
+        AGENTS.md|AGENTS.override.md|config.toml) echo "instruction"; return 0 ;;
       esac
       case "$rel" in
         *.md|*.toml|*.txt) echo "instruction"; return 0 ;;
