@@ -72,13 +72,11 @@ scan::list_files() {
 # have a dir (ad-hoc use): it walks the dir once and delegates. The scan path uses
 # _skc_content_hash_from_list with a precomputed list to avoid re-walking.
 scan::content_hash() {
-  local dir="$1" list out
-  command -v sha256sum >/dev/null 2>&1 || { echo "sha256:unavailable"; return 0; }
-  list="$(mktemp)"
-  scan::list_files "$dir" > "$list"
-  out="$(_skc_content_hash_from_list "$dir" "$list")"
-  rm -f "$list"
-  printf '%s\n' "$out"
+  local dir="$1"
+  # The list is read exactly once (sort) inside the helper, so a process
+  # substitution suffices — no temp file to create and clean up. The helper's own
+  # sha256sum guard covers the unavailable case.
+  _skc_content_hash_from_list "$dir" <(scan::list_files "$dir")
 }
 
 # _skc_content_hash_from_list <dir> <list_file> -> "sha256:<hex>" over
