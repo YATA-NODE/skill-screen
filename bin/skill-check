@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# skill-check — stage-1 entry point for skill-checker.
+#
+# Walks a skill/extension directory, runs the readable grep ruleset, and prints a
+# verdict. This is the MECHANICAL stage only: it surfaces candidates. For intent,
+# hand the JSON plus prompts/stage2-interpret.md to an LLM (or read it yourself).
+#
+# A verdict is NOT a safety guarantee. "no_signal" means "no rule matched", not
+# "safe". Read what it flags and use judgment.
+set -u
+
+_self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_root="$(cd "$_self_dir/.." && pwd)"
+_lib="$_root/lib"
+
+# shellcheck source=/dev/null
+. "$_lib/patterns.sh"
+# shellcheck source=/dev/null
+. "$_lib/profiles.sh"
+# shellcheck source=/dev/null
+. "$_lib/scan.sh"
+
+usage() {
+  cat <<'EOF'
+skill-check — local, transparent pre-install screen for agent skills.
+
+Usage:
+  skill-check --target <dir> [options]
+
+Options:
+  --target <dir>        Directory of the skill/extension to screen (required).
+  --profile <name>      auto (default) | claude-code-skill | codex-extension | generic
+  --with-jp             Also apply the Japanese warning patterns.
+  --include-secret-scan Also scan for shipped credentials (masked in output).
+  --quarantine[=<dir>]  If flagged, move the target aside (default: ./quarantine/).
+  --json                Print the machine-readable JSON instead of a summary.
+  -h, --help            Show this help.
+
+Exit codes:  0 no_signal   1 review_needed   2 do_not_install   3 scan-error
+EOF
+}
+
+target="" ; profile="auto" ; with_jp=0 ; secret=0 ; want_json=0
+quarantine=0 ; quarantine_dir=""
+
+need_val() { [ "$1" -ge 2 ] || { printf 'skill-check: %s requires a value\n' "$2" >&2; exit 3; }; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --target) need_val "$#" --target; target="$2"; shift 2 ;;
+    --target=*) target="${1#*=}"; shift ;;
+    --profile) need_val "$#" --profile; profile="$2"; shift 2 ;;
+    --profile=*) profile="${1#*=}"; shift ;;
+    --with-jp) with_jp=1; shift ;;
+    --include-secret-scan) secret=1; shift ;;
+    --quarantine) quarantine=1; shift ;;
+    --quarantine=*) quarantine=1; quarantine_dir="${1#*=}"; shift ;;
+    --json) want_json=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) printf 'skill-check: unknown argument: %s\n' "$1" >&2; usage >&2; exit 3 ;;
+  esac
+done
+
+if [ -z "$target" ]; then
+  printf 'skill-check: --target <dir> is required\n' >&2; usage >&2; exit 3
+fi
+
+case "$profile" in
+  auto|claude-code-skill|codex-extension|generic) ;;
+  *) printf 'skill-check: invalid --profile: %s\n' "$profile" >&2; exit 3 ;;
+esac
+[ "$profile" = "auto" ] && profile="$(profiles::detect "$target")"
+
+json_out="$(mktemp)"
+trap 'rm -f "$json_out"' EXIT
+
+scan::run "$target" "$profile" "$with_jp" "$secret" "$json_out"
+signal="$SKC_SIGNAL"
+
+# --- quarantine (opt-in, only when flagged) ---
+if [ "$quarantine" = 1 ] && [ "$signal" != "no_signal" ] && [ "$signal" != "scan-error" ]; then
+  : "${quarantine_dir:=$PWD/quarantine}"
+  short="$(scan::content_hash "$target" | cut -c8-15)"
+  dest="$quarantine_dir/$(basename -- "$target")-$short"
+  mkdir -p "$quarantine_dir"
+  if mv -- "$target" "$dest" 2>/dev/null; then
+    printf 'quarantined: moved to %s\n' "$dest" >&2
+    printf 'NOTE: quarantine is a heuristic action, not proof of malice. Review before deleting.\n' >&2
+  else
+    printf 'skill-check: quarantine move failed (left target in place)\n' >&2
+  fi
+fi
+
+# --- output ---
+if [ "$want_json" = 1 ]; then
+  cat "$json_out"
+else
+  printf 'skill-check  profile=%s  verdict=%s\n' "$profile" "$signal"
+  case "$signal" in
+    no_signal)      printf '  No rule matched. This is NOT a proof of safety.\n' ;;
+    review_needed)  printf '  Warning-level matches. Read them before installing:\n' ;;
+    do_not_install) printf '  Blocked-level matches (or a scan red flag). Do not install as-is:\n' ;;
+    scan-error)     printf '  Could not scan the target (missing dir?).\n' ;;
+  esac
+  if [ "$signal" = "review_needed" ] || [ "$signal" = "do_not_install" ]; then
+    if command -v jq >/dev/null 2>&1; then
+      jq -r '.hits[]? | "    [\(.severity)] \(.category)  \(.file):\(.line)"' "$json_out" 2>/dev/null | sort -u
+      jq -r '.secret_hits[]? | "    [secret] \(.category)  \(.file):\(.line)  \(.masked)"' "$json_out" 2>/dev/null
+    else
+      printf '    (install jq for a per-hit breakdown; run with --json for raw output)\n'
+    fi
+    printf '  Next: hand this output + %s/prompts/stage2-interpret.md to an LLM for intent.\n' "$_root"
+  fi
+fi
+
+case "$signal" in
+  no_signal) exit 0 ;;
+  review_needed) exit 1 ;;
+  do_not_install) exit 2 ;;
+  *) exit 3 ;;
+esac

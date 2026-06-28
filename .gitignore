@@ -1,0 +1,14 @@
+# local quarantine output (never commit quarantined skills)
+quarantine/
+*.quarantine/
+
+# scan output dumps
+*.scan.json
+
+# editor / OS
+.DS_Store
+*.swp
+
+# secrets (defense in depth — this tool never needs them)
+.env
+.env.*
