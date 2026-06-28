@@ -35,6 +35,23 @@ read every rule, and nothing leaves your laptop.
    that merely *document* attacks. The prompt treats the skill as **data** and is
    instructed not to follow any instructions inside it.
 
+### What it inspects (scope & profiles)
+
+- **Every file is scanned, not just `SKILL.md`.** Stage 1 walks the whole target and
+  greps *every* non-denylisted file — including the skill's own scripts and executables
+  (`.sh`, `.py`, `.js`, …), which are where a `curl|bash` installer or a credential
+  exfil usually lives. Each hit is labelled with a `role` (`instruction` / `executable`
+  / `other`) so you can see whether a match came from prose or from code. Narrowing the
+  scan by file type is deliberately *not* done — that would let a payload hide in an
+  unexpected file. (Denylisted noise such as `.git/`, `node_modules/`, `.env` is skipped;
+  binaries are hashed but not pattern-scanned — see *Limitations*.)
+- **Profiles are auto-detected** (override with `--profile`). They only affect
+  auto-detection and the `role` labels — never *which* files are scanned:
+  - `claude-code-skill` — a `SKILL.md` is present at the top level.
+  - `codex-extension` — an `AGENTS.md`, `config.toml`, or `.codex/config.toml` is present
+    (and no `SKILL.md`). This is how Codex CLI extensions/prompts are screened.
+  - `generic` — anything else; scan everything, classify by extension only.
+
 ### Verdicts (not safety guarantees)
 
 | verdict | meaning |
@@ -48,11 +65,23 @@ read every rule, and nothing leaves your laptop.
 ```sh
 bin/skill-screen --target /path/to/some-skill            # human-readable verdict
 bin/skill-screen --target /path/to/some-skill --json     # machine-readable JSON
-bin/skill-screen --target ./suspect --quarantine         # move flagged skill aside
+bin/skill-screen --target ./suspect --quarantine         # move aside into ./quarantine/
+bin/skill-screen --target ./suspect --quarantine=/tmp/q  # ...into a directory you choose
 ```
 
-Requirements: `bash`, `grep`, `sha256sum`. `jq` is used for clean JSON output; without
-it the tool degrades safely.
+### Options
+
+| option | meaning |
+|---|---|
+| `--target <dir>` | directory of the skill/extension to screen (required) |
+| `--profile <name>` | `auto` (default) \| `claude-code-skill` \| `codex-extension` \| `generic` (see *What it inspects*) |
+| `--with-jp` | also apply the Japanese warning patterns |
+| `--include-secret-scan` | also scan for shipped credentials (masked in output) |
+| `--quarantine[=<dir>]` | if the verdict is not `no_signal`/`scan-error`, move the target aside. Default destination is `./quarantine/`; pass `--quarantine=<dir>` to choose another. The moved copy is named `<basename>-<short-hash>`. Quarantine is a heuristic action, **not** proof of malice — review before deleting. |
+| `--json` | print the machine-readable JSON instead of a summary |
+
+Requirements: `bash`, `grep`, `sha256sum`, `timeout` (coreutils). `jq` is used for clean
+JSON output; without it the tool degrades safely.
 
 ## Limitations (read these)
 
