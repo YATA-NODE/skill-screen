@@ -2,8 +2,9 @@
 
 > 日本語 → English（同じ内容を日本語・英語の順で記載 / same content, Japanese first then English）
 
-サードパーティ製の AI エージェント skill（Claude Code skill、Codex 拡張）を、インストール前に
-チェックする、ローカル完結・透明な安全スクリーン。
+サードパーティ製の AI エージェント skill（Claude Code / OpenAI Codex、共通の `SKILL.md` 形式）を、
+インストール前にチェックする、ローカル完結・透明な安全スクリーン。Codex のカスタム指示
+（`AGENTS.md` 等）も検査対象に含みます。
 
 > ステータス: コアはテスト済み。Stage 1 エンジンとラベル付きコーパスは dry-run スイート
 > （`tests/test-scan.sh`）を全て通過、ライセンスは MIT。未公開 — 解説記事を準備中。
@@ -110,7 +111,8 @@ bin/skill-screen --target ./suspect --quarantine=/tmp/q  # ...任意のディレ
 # English
 
 A local, transparent pre-install safety screen for third-party AI agent skills
-(Claude Code skills, Codex extensions).
+(Claude Code and OpenAI Codex, the shared `SKILL.md` format). It also screens Codex
+custom instructions (`AGENTS.md`, etc.).
 
 > Status: tested core. The Stage 1 engine and the labeled corpus pass the full
 > dry-run suite (`tests/test-scan.sh`); the license is MIT. Not yet published —
