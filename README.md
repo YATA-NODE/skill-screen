@@ -1,5 +1,109 @@
 # skill-screen
 
+> 日本語 → English（同じ内容を日本語・英語の順で記載 / same content, Japanese first then English）
+
+サードパーティ製の AI エージェント skill（Claude Code skill、Codex 拡張）を、インストール前に
+チェックする **ローカル完結・透明** な安全スクリーン。
+
+> ステータス: コアはテスト済み。Stage 1 エンジンとラベル付きコーパスは dry-run スイート
+> （`tests/test-scan.sh`）を全て通過、ライセンスは MIT。未公開 — 解説記事を準備中。
+
+## なぜ作ったか
+
+GitHub や gist で見つけた skill を `~/.claude/skills/` に入れる時点で、その `SKILL.md` と
+スクリプトに、あなたのエージェントができること全てを託すことになります。公式マーケット
+プレイスは自分たちの掲載物は審査しますが、**自分で入れる skill を検査する仕組みは用意されて
+いません**。
+
+`skill-screen` はその隙間を、2 つの意図的な性質で埋めます:
+
+- **ローカル完結（Local-complete）** — skill をどこにも送信しません。全てあなたのマシン上で
+  動きます。アカウント不要・アップロードなし・テレメトリなし。
+- **透明（Transparent）** — 検出ロジックの全ては `lib/patterns.sh` に書かれた、読める `grep`
+  パターンです。機械的ステージにモデルもブラックボックスもありません。
+
+商用スキャナと機能数で張り合うつもりはありません。要点は信頼です — 全ルールを自分で読めて、
+何もラップトップの外に出ません。
+
+## 仕組み — 検査と解釈の分離
+
+1. **Stage 1（機械的、`grep`）** — `bin/skill-screen` が skill ディレクトリを走査し、固定
+   された読めるルールセット（prompt-injection / 危険な振る舞い）を照合。machine-readable な
+   JSON verdict を出力。設計上 高 recall（候補を挙げるだけで、意図は判断しない）。
+2. **Stage 2（解釈、任意）** — `prompts/stage2-interpret.md` と Stage 1 の JSON を LLM に渡す
+   （または自分で読む）ことで、true positive と「攻撃を*説明しているだけ*の skill」を切り分け
+   る。プロンプトは skill を **データ** として扱い、その中の指示には従わないよう指示されている。
+
+### 何を検査するか（範囲とプロファイル）
+
+- **`SKILL.md` だけでなく、全ファイルを検査。** Stage 1 は対象全体を走査し、denylist 以外の
+  *全*ファイルを grep します — skill 自身のスクリプトや実行ファイル（`.sh` / `.py` / `.js` …）
+  も含みます（`curl|bash` インストーラや認証情報の流出は、たいていコード側に潜むため）。各 hit
+  には `role`（`instruction` / `executable` / `other`）が付与され、prose 由来かコード由来かが
+  分かります。ファイル型で走査を絞ることは意図的にしません — payload を予期せぬファイル型に
+  隠させてしまうからです。（`.git/` / `node_modules/` / `.env` 等の denylist ノイズは除外。
+  バイナリは hash 化のみで pattern 走査外 — *制限事項* 参照。）
+- **プロファイルは自動判定**（`--profile` で上書き可）。判定は auto 検出と `role` ラベルにのみ
+  影響し、*どのファイルを走査するか* は変えません:
+  - `claude-code-skill` — トップレベルに `SKILL.md` がある。
+  - `codex-extension` — `AGENTS.md` / `config.toml` / `.codex/config.toml` がある（かつ
+    `SKILL.md` がない）。Codex CLI 拡張/プロンプトはこの経路で検査される。
+  - `generic` — それ以外。全て走査し、拡張子だけで分類。
+
+### verdict（安全保証ではない）
+
+| verdict | 意味 |
+|---|---|
+| `no_signal` | どのパターンにも一致せず。**安全の証明ではない** — ルールが何も捕まえなかっただけ。 |
+| `review_needed` | warning レベルの一致あり。インストール前に読むこと。 |
+| `do_not_install` | blocked レベルの一致（instruction override、`curl\|bash` 等）。 |
+
+## 使い方
+
+```sh
+bin/skill-screen --target /path/to/some-skill            # 人間向けの判定
+bin/skill-screen --target /path/to/some-skill --json     # machine-readable な JSON
+bin/skill-screen --target ./suspect --quarantine         # ./quarantine/ へ退避
+bin/skill-screen --target ./suspect --quarantine=/tmp/q  # ...任意のディレクトリへ
+```
+
+### オプション
+
+| オプション | 意味 |
+|---|---|
+| `--target <dir>` | 検査する skill/拡張のディレクトリ（必須） |
+| `--profile <name>` | `auto`（既定）\| `claude-code-skill` \| `codex-extension` \| `generic`（*何を検査するか* 参照） |
+| `--with-jp` | 日本語の warning パターンも適用 |
+| `--include-secret-scan` | 同梱された認証情報もスキャン（出力ではマスク） |
+| `--quarantine[=<dir>]` | verdict が `no_signal`/`scan-error` 以外のとき、対象を退避。退避先の既定は `./quarantine/`、`--quarantine=<dir>` で指定可。退避コピー名は `<basename>-<short-hash>`。退避はヒューリスティックな処置であって**有罪の証明ではない** — 削除前に確認のこと。 |
+| `--json` | サマリでなく machine-readable な JSON を出力 |
+
+必要なもの: `bash`、`grep`、`sha256sum`、`timeout`（coreutils）。`jq` があれば JSON が整形
+される（なくても安全に degrade）。
+
+## 制限事項（必ず読むこと）
+
+`skill-screen` はスクリーンであって証明ではありません。設計上の既知の境界:
+
+- **`no_signal` は「安全」ではない。** 走査した範囲でルールが一致しなかった、という意味。
+- **バイナリは hash 化されるが pattern 走査されない。** バイナリ blob に隠された payload は
+  テキストルールに一致しない（ただし `content_hash` には含まれる）。
+- **対象外へ逃げる symlink は、追従せず flag。** `SKILL.md` が自ディレクトリ外を指す skill は、
+  読まずに `do_not_install` と報告（scan-bypass を塞ぎ、かつ対象外のファイルを読まない）。
+  ツリー内の通常ファイルへの symlink は通常通り走査。
+- **Stage 1 は高 recall。** 攻撃を*説明しているだけ*の skill も flag する。意図と説明の
+  切り分けは Stage 2（LLM プロンプト）が行う。
+- **パターン網羅は意図的に小さく、英語+日本語のみ。** 自分で読み切れるスクリーンは、読めない
+  巨大リストに勝る。
+
+## ライセンス
+
+[LICENSE](LICENSE) を参照。
+
+---
+
+# English
+
 A **local, transparent** pre-install safety screen for third-party AI agent skills
 (Claude Code skills, Codex extensions).
 
