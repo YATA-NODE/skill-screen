@@ -68,13 +68,29 @@ scan::list_files() {
   done < <(cd "$dir" 2>/dev/null && find . \( -type f -o -type l \) -print0 2>/dev/null)
 }
 
-# scan::content_hash <dir> -> "sha256:<hex>" over (relpath + US + sha256(content)),
-# sorted for determinism. Mirrors the internal audit-hash approach.
+# scan::content_hash <dir> -> "sha256:<hex>". Thin wrapper kept for callers that only
+# have a dir (ad-hoc use): it walks the dir once and delegates. The scan path uses
+# _skc_content_hash_from_list with a precomputed list to avoid re-walking.
 scan::content_hash() {
-  local dir="$1" rel sum
+  local dir="$1" list out
   command -v sha256sum >/dev/null 2>&1 || { echo "sha256:unavailable"; return 0; }
-  sum="$(scan::list_files "$dir" | LC_ALL=C sort | while IFS= read -r rel; do
-    printf '%s\037%s\n' "$rel" "$(sha256sum "$dir/$rel" 2>/dev/null | cut -d' ' -f1)"
+  list="$(mktemp)"
+  scan::list_files "$dir" > "$list"
+  out="$(_skc_content_hash_from_list "$dir" "$list")"
+  rm -f "$list"
+  printf '%s\n' "$out"
+}
+
+# _skc_content_hash_from_list <dir> <list_file> -> "sha256:<hex>" over
+# (relpath + US + sha256(content)), LC_ALL=C-sorted for determinism. <list_file> is a
+# precomputed scan::list_files output (one relpath per line). sha256sum is wrapped in
+# timeout so a pathological file cannot hang the fingerprint; a partial hash is NOT
+# wired to SKC_INCOMPLETE (content_hash is an identity, not a detection signal).
+_skc_content_hash_from_list() {
+  local dir="$1" list="$2" rel sum
+  command -v sha256sum >/dev/null 2>&1 || { echo "sha256:unavailable"; return 0; }
+  sum="$(LC_ALL=C sort "$list" | while IFS= read -r rel; do
+    printf '%s\037%s\n' "$rel" "$(timeout "$SKC_GREP_TIMEOUT" sha256sum "$dir/$rel" 2>/dev/null | cut -d' ' -f1)"
   done | sha256sum | cut -d' ' -f1)"
   echo "sha256:$sum"
 }
@@ -114,6 +130,19 @@ _skc_has_placeholder() {
 # _skc_mask <token> -> first 4 chars + "***" (raw secret never leaves the function)
 _skc_mask() {
   printf '%s***' "$(printf '%s' "$1" | cut -c1-4)"
+}
+
+# _skc_grep <regex> <file> -> capture matched "line:content" rows into the global
+# _SKC_MATCHES (newline-separated; empty if none) and flag a timeout. Shared by the
+# pattern and secret scan loops so the grep+timeout+rc124 skeleton lives in one place.
+# MUST be called WITHOUT command substitution: `_skc_grep ...` runs in the current
+# shell, so SKC_INCOMPLETE=1 (the fail-closed timeout flag) survives in the caller.
+# A `$(_skc_grep ...)` form would run it in a subshell and silently discard that
+# assignment, defeating fail-closed. The grep's own $() is internal and side-effect free.
+_skc_grep() {
+  local rc
+  _SKC_MATCHES="$(timeout "$SKC_GREP_TIMEOUT" grep -nIE -- "$1" "$2" 2>/dev/null)"; rc=$?
+  [ "$rc" -eq 124 ] && SKC_INCOMPLETE=1
 }
 
 # _skc_emit_json <dir> <profile> <content_hash> <files> <patterns> <signal>
@@ -167,6 +196,7 @@ _skc_emit_json() {
 scan::run() {
   local dir="$1" profile="$2" with_jp="$3" secret="$4" out="$5"
   SKC_SIGNAL="scan-error"
+  SKC_CONTENT_HASH=""
   SKC_INCOMPLETE=0
 
   if [ ! -d "$dir" ]; then
@@ -174,23 +204,33 @@ scan::run() {
     return 0
   fi
 
-  local hits_tmp secret_tmp; hits_tmp="$(mktemp)"; secret_tmp="$(mktemp)"
+  local hits_tmp secret_tmp files_tmp
+  hits_tmp="$(mktemp)"; secret_tmp="$(mktemp)"; files_tmp="$(mktemp)"
   SKC_BADNAME_FLAG="$(mktemp)"
+  # Clean every temp on any return path. Set AFTER the mktemps so the missing-dir
+  # early return above (which runs before any temp exists) never fires it. RETURN
+  # traps set inside a function are function-scoped (no functrace) = no leak to
+  # callers (verified).
+  trap 'rm -f "$hits_tmp" "$secret_tmp" "$files_tmp" "$SKC_BADNAME_FLAG"' RETURN
+
+  # Walk the directory exactly once; reuse the cached list for the file count, the
+  # content hash, and the scan loop (previously three separate walks).
+  scan::list_files "$dir" > "$files_tmp"
   local files_scanned content_hash pattern_count
-  files_scanned="$(scan::list_files "$dir" | grep -c . || true)"
-  content_hash="$(scan::content_hash "$dir")"
+  files_scanned="$(grep -c . "$files_tmp" || true)"
+  content_hash="$(_skc_content_hash_from_list "$dir" "$files_tmp")"
+  SKC_CONTENT_HASH="$content_hash"
   pattern_count="$(patterns::category_count "$([ "$with_jp" = 1 ] && echo --with-jp)")"
 
-  local rel entry category rest severity regex matches rc line content excerpt role
+  local rel entry category rest severity regex line content excerpt role
   while IFS= read -r rel; do
     while IFS= read -r entry; do
       [ -z "$entry" ] && continue
       category="${entry%%|*}"; rest="${entry#*|}"
       severity="${rest%%|*}"; regex="${rest#*|}"
-      matches="$(timeout "$SKC_GREP_TIMEOUT" grep -nIE -- "$regex" "$dir/$rel" 2>/dev/null)"; rc=$?
-      [ "$rc" -eq 124 ] && SKC_INCOMPLETE=1
-      [ -z "$matches" ] && continue
-      printf '%s\n' "$matches" | head -n "$SKC_MATCH_CAP" | while IFS= read -r m; do
+      _skc_grep "$regex" "$dir/$rel"
+      [ -z "$_SKC_MATCHES" ] && continue
+      printf '%s\n' "$_SKC_MATCHES" | head -n "$SKC_MATCH_CAP" | while IFS= read -r m; do
         [ -z "$m" ] && continue
         line="${m%%:*}"; content="${m#*:}"
         excerpt="$(_skc_sanitize "$content")"
@@ -204,10 +244,9 @@ scan::run() {
       while IFS= read -r entry; do
         [ -z "$entry" ] && continue
         category="${entry%%|*}"; rest="${entry#*|}"; regex="${rest#*|}"
-        matches="$(timeout "$SKC_GREP_TIMEOUT" grep -nIE -- "$regex" "$dir/$rel" 2>/dev/null)"; rc=$?
-        [ "$rc" -eq 124 ] && SKC_INCOMPLETE=1
-        [ -z "$matches" ] && continue
-        printf '%s\n' "$matches" | head -n "$SKC_MATCH_CAP" | while IFS= read -r m; do
+        _skc_grep "$regex" "$dir/$rel"
+        [ -z "$_SKC_MATCHES" ] && continue
+        printf '%s\n' "$_SKC_MATCHES" | head -n "$SKC_MATCH_CAP" | while IFS= read -r m; do
           [ -z "$m" ] && continue
           line="${m%%:*}"; content="${m#*:}"
           _skc_has_placeholder "$content" && continue
@@ -217,7 +256,7 @@ scan::run() {
         done
       done < <(patterns::secret_patterns)
     fi
-  done < <(scan::list_files "$dir")
+  done < "$files_tmp"
 
   # signal: fail-closed on incomplete scan or control-char/escaping filenames.
   # severity is field 2 (US-delimited); awk -F'\037' interprets the octal escape,
@@ -240,5 +279,5 @@ scan::run() {
 
   _skc_emit_json "$dir" "$profile" "$content_hash" "$files_scanned" \
     "$pattern_count" "$signal" "$hits_tmp" "$secret_tmp" > "$out"
-  rm -f "$hits_tmp" "$secret_tmp" "$SKC_BADNAME_FLAG"
+  # temps removed by the RETURN trap set at the top of this function.
 }

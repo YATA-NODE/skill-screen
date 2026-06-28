@@ -79,7 +79,10 @@ signal="$SKC_SIGNAL"
 # --- quarantine (opt-in, only when flagged) ---
 if [ "$quarantine" = 1 ] && [ "$signal" != "no_signal" ] && [ "$signal" != "scan-error" ]; then
   : "${quarantine_dir:=$PWD/quarantine}"
-  short="$(scan::content_hash "$target" | cut -c8-15)"
+  # Reuse the hash scan::run already computed (avoids a second walk+hash of the
+  # target). Fall back to recomputing only if it is somehow unset.
+  short="$(printf '%s' "${SKC_CONTENT_HASH:-}" | cut -c8-15)"
+  [ -z "$short" ] && short="$(scan::content_hash "$target" | cut -c8-15)"
   dest="$quarantine_dir/$(basename -- "$target")-$short"
   mkdir -p "$quarantine_dir"
   if mv -- "$target" "$dest" 2>/dev/null; then
