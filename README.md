@@ -22,8 +22,10 @@ GitHub や gist で見つけた skill を `~/.claude/skills/` に入れる時点
 - **透明（Transparent）** — 検出ロジックの全ては `lib/patterns.sh` に書かれた、読める `grep`
   パターンです。機械的ステージにモデルもブラックボックスもありません。
 
-商用スキャナと機能数で張り合うつもりはありません。要点は信頼です — 全ルールを自分で読めて、
-何もラップトップの外に出ません。
+既存の skill/agent スキャナ(OSS のものもあります)は、検査のためにアカウント登録や、スキル名・
+メタデータのクラウド送信を必要とすることが多いです。`skill-screen` は機能数でそれらと張り合い
+ません。要点は信頼です — 検出ルールは 1 ファイルで全部読め、スキルもメタデータも一切ラップ
+トップの外に出ません(アカウント不要)。
 
 ## 仕組み — 検査と解釈の分離
 
@@ -128,8 +130,11 @@ skill you install yourself**.
 - **Transparent** — the entire detection logic is plain `grep` patterns you can read
   in `lib/patterns.sh`. There is no model and no black box in the mechanical stage.
 
-It does **not** try to out-feature commercial scanners. The point is trust: you can
-read every rule, and nothing leaves your laptop.
+Other skill/agent scanners exist — some are open source — but they typically need an
+account and send your skills' names or metadata to a cloud service to run their checks.
+`skill-screen` does **not** try to out-feature them. The point is trust: every rule lives
+in one file you can read, and nothing — no skill, no metadata — ever leaves your machine
+(no account required).
 
 ## How it works — inspection and interpretation are separate
 
