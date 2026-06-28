@@ -45,9 +45,12 @@ GitHub や gist で見つけた skill を `~/.claude/skills/` に入れる時点
   バイナリは hash 化のみで pattern 走査外 — *制限事項* 参照。）
 - **プロファイルは自動判定**（`--profile` で上書き可）。判定は auto 検出と `role` ラベルにのみ
   影響し、*どのファイルを走査するか* は変えません:
-  - `claude-code-skill` — トップレベルに `SKILL.md` がある。
-  - `codex-extension` — `AGENTS.md` / `config.toml` / `.codex/config.toml` がある（かつ
-    `SKILL.md` がない）。Codex CLI 拡張/プロンプトはこの経路で検査される。
+  - `agent-skill` — トップレベルに `SKILL.md` がある。`SKILL.md` は **Claude Code と OpenAI
+    Codex の両方が使う共通仕様**（open agent skills spec）なので、どちらのツールの skill も
+    このプロファイルで扱う。
+  - `codex-config` — `AGENTS.md` / `AGENTS.override.md` / `config.toml` / `.codex/config.toml`
+    がある（かつ `SKILL.md` がない）。`AGENTS.md` は skill ではなく Codex の**カスタム指示**
+    ファイルだが、エージェントが読むため検査対象にする。
   - `generic` — それ以外。全て走査し、拡張子だけで分類。
 
 ### verdict（安全保証ではない）
@@ -72,7 +75,7 @@ bin/skill-screen --target ./suspect --quarantine=/tmp/q  # ...任意のディレ
 | オプション | 意味 |
 |---|---|
 | `--target <dir>` | 検査する skill/拡張のディレクトリ（必須） |
-| `--profile <name>` | `auto`（既定）\| `claude-code-skill` \| `codex-extension` \| `generic`（*何を検査するか* 参照） |
+| `--profile <name>` | `auto`（既定）\| `agent-skill` \| `codex-config` \| `generic`（*何を検査するか* 参照） |
 | `--with-jp` | 日本語の warning パターンも適用 |
 | `--include-secret-scan` | 同梱された認証情報もスキャン（出力ではマスク） |
 | `--quarantine[=<dir>]` | verdict が `no_signal`/`scan-error` 以外のとき、対象を退避。退避先の既定は `./quarantine/`、`--quarantine=<dir>` で指定可。退避コピー名は `<basename>-<short-hash>`。退避はヒューリスティックな処置であって**有罪の証明ではない** — 削除前に確認のこと。 |
@@ -151,9 +154,12 @@ read every rule, and nothing leaves your laptop.
   binaries are hashed but not pattern-scanned — see *Limitations*.)
 - **Profiles are auto-detected** (override with `--profile`). They only affect
   auto-detection and the `role` labels — never *which* files are scanned:
-  - `claude-code-skill` — a `SKILL.md` is present at the top level.
-  - `codex-extension` — an `AGENTS.md`, `config.toml`, or `.codex/config.toml` is present
-    (and no `SKILL.md`). This is how Codex CLI extensions/prompts are screened.
+  - `agent-skill` — a `SKILL.md` is present at the top level. `SKILL.md` is the open
+    agent skills spec used by **both Claude Code and OpenAI Codex**, so a skill from
+    either tool uses this profile.
+  - `codex-config` — an `AGENTS.md`, `AGENTS.override.md`, `config.toml`, or
+    `.codex/config.toml` is present (and no `SKILL.md`). `AGENTS.md` is Codex's custom
+    *instructions* file, **not** a skill, but an agent reads it so it is screened too.
   - `generic` — anything else; scan everything, classify by extension only.
 
 ### Verdicts (not safety guarantees)
@@ -178,7 +184,7 @@ bin/skill-screen --target ./suspect --quarantine=/tmp/q  # ...into a directory y
 | option | meaning |
 |---|---|
 | `--target <dir>` | directory of the skill/extension to screen (required) |
-| `--profile <name>` | `auto` (default) \| `claude-code-skill` \| `codex-extension` \| `generic` (see *What it inspects*) |
+| `--profile <name>` | `auto` (default) \| `agent-skill` \| `codex-config` \| `generic` (see *What it inspects*) |
 | `--with-jp` | also apply the Japanese warning patterns |
 | `--include-secret-scan` | also scan for shipped credentials (masked in output) |
 | `--quarantine[=<dir>]` | if the verdict is not `no_signal`/`scan-error`, move the target aside. Default destination is `./quarantine/`; pass `--quarantine=<dir>` to choose another. The moved copy is named `<basename>-<short-hash>`. Quarantine is a heuristic action, **not** proof of malice — review before deleting. |
