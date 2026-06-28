@@ -4,8 +4,8 @@ A **local, transparent** pre-install safety screen for third-party AI agent skil
 (Claude Code skills, Codex extensions).
 
 > Status: tested core. The Stage 1 engine and the labeled corpus pass the full
-> dry-run suite (`tests/test-scan.sh`); the license is MIT. Not yet published, and
-> the repo name is still tentative — a companion write-up is in progress.
+> dry-run suite (`tests/test-scan.sh`); the license is MIT. Not yet published —
+> a companion write-up is in progress.
 
 ## Why
 
