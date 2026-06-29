@@ -5,10 +5,11 @@
 サードパーティ製の AI エージェント skill（Claude Code / OpenAI Codex、共通の `SKILL.md` 形式）を、
 インストール前にチェックする、ローカル完結・透明な安全スクリーン。skill 本体だけでなく、
 エージェントが読む指示ファイル（`SKILL.md` / `AGENTS.md` / `CLAUDE.md` 等）やスクリプトも含め、
-ディレクトリ内の全ファイルを検査します。
+ディレクトリ内の全ファイルを検査します。**本体は単一スクリプト `skill-screen` 1 ファイル**で、
+上から読めば「何を・どこで検査しているか」が分かります。
 
 > ステータス: コアはテスト済み。Stage 1 エンジンとラベル付きコーパスは dry-run スイート
-> （`tests/test-scan.sh`）を全て通過、ライセンスは MIT。未公開 — 解説記事を準備中。
+> （`test-scan.sh`）を全て通過、ライセンスは MIT。未公開 — 解説記事を準備中。
 
 ## なぜ作ったか
 
@@ -21,8 +22,10 @@ GitHub や gist で見つけた skill を `~/.claude/skills/` に入れる時点
 
 - **ローカル完結（Local-complete）** — skill をどこにも送信しません。全てあなたのマシン上で
   動きます。アカウント不要・アップロードなし・テレメトリなし。
-- **透明（Transparent）** — 検出ロジックの全ては `lib/patterns.sh` に書かれた、読める `grep`
-  パターンです。機械的ステージにモデルもブラックボックスもありません。
+- **透明（Transparent）** — 検出ロジックの全ては単一ファイル `skill-screen` の
+  **① DETECTION RULES** 節（読める `grep` パターン）と、それを全ファイルに当てる
+  **② INSPECTION** 節（`_skc_grep`）に書かれています。機械的ステージにモデルもブラック
+  ボックスもありません。ルールを変えたいときは ① を編集するだけです。
 
 既存の skill/agent スキャナ（OSS のものもあります）は、検査のためにアカウント登録や、スキル名・
 メタデータのクラウド送信を必要とすることが多いです。`skill-screen` は機能数でそれらと張り合い
@@ -31,14 +34,14 @@ GitHub や gist で見つけた skill を `~/.claude/skills/` に入れる時点
 
 ## 仕組み — 検査と解釈の分離
 
-1. **Stage 1（機械的、`grep`）** — `bin/skill-screen` が skill ディレクトリを走査し、固定
+1. **Stage 1（機械的、`grep`）** — `skill-screen` が skill ディレクトリを走査し、固定
    された読めるルールセット（prompt-injection / 危険な振る舞い）を照合。machine-readable な
    JSON verdict を出力。設計上 高 recall（候補を挙げるだけで、意図は判断しない）。
-2. **Stage 2（解釈、任意）** — `prompts/stage2-interpret.md` と Stage 1 の JSON を LLM に渡す
+2. **Stage 2（解釈、任意）** — `stage2-interpret.md` と Stage 1 の JSON を LLM に渡す
    （または自分で読む）ことで、true positive と「攻撃を*説明しているだけ*の skill」を切り分け
    る。プロンプトは skill をデータとして扱い、その中の指示には従わないよう指示されている。
 
-### 何を検査するか（範囲とプロファイル）
+### 何を検査するか（走査範囲）
 
 - `SKILL.md` だけでなく、全ファイルを検査します。Stage 1 は対象全体を走査し、denylist 以外の
   *全*ファイルを grep します — skill 自身のスクリプトや実行ファイル（`.sh` / `.py` / `.js` …）
@@ -47,17 +50,10 @@ GitHub や gist で見つけた skill を `~/.claude/skills/` に入れる時点
   分かります。ファイル型で走査を絞ることは意図的にしません — payload を予期せぬファイル型に
   隠させてしまうからです。（`.git/` / `node_modules/` / `.env` 等の denylist ノイズは除外。
   バイナリは hash 化のみで pattern 走査外 — *制限事項* 参照。）
-- プロファイルは自動判定します（`--profile` で上書き可）。プロファイルは auto 検出のラベルにのみ
-  影響し、`role` ラベルや *どのファイルを走査するか* は変えません（`role` は拡張子だけで決まり、
-  プロファイル非依存です）:
-  - `agent-skill` — トップレベルに `SKILL.md` がある。`SKILL.md` は Claude Code と OpenAI
-    Codex の両方が使う共通仕様（open agent skills spec）なので、どちらのツールの skill も
-    このプロファイルで扱う。
-  - `generic` — それ以外。全て走査し、拡張子だけで分類。
-
-  どのツール固有の指示ファイル名（Codex の `AGENTS.md`、Claude Code の `CLAUDE.md` 等）も
-  特別扱いしません。いずれも全走査され、`*.md` / `*.txt` は拡張子だけで `instruction` と
-  ラベルされます — 特定のツールを優遇も除外もしません。
+- `role`（`instruction` / `executable` / `other`）は拡張子だけで決まります。どのツール固有の
+  指示ファイル名（Codex の `AGENTS.md`、Claude Code の `CLAUDE.md` 等）も特別扱いしません。
+  いずれも全走査され、`*.md` / `*.txt` は拡張子だけで `instruction` とラベルされます —
+  特定のツールを優遇も除外もしません。
 
 ### verdict（安全保証ではない）
 
@@ -70,21 +66,21 @@ GitHub や gist で見つけた skill を `~/.claude/skills/` に入れる時点
 ## 使い方
 
 ```sh
-bin/skill-screen --target /path/to/some-skill            # 人間向けの判定
-bin/skill-screen --target /path/to/some-skill --json     # machine-readable な JSON
-bin/skill-screen --target ./suspect --quarantine         # ./quarantine/ へ退避
-bin/skill-screen --target ./suspect --quarantine=/tmp/q  # ...任意のディレクトリへ
+./skill-screen --target /path/to/some-skill            # 人間向けの判定
+./skill-screen --target /path/to/some-skill --json     # machine-readable な JSON
+./skill-screen --target ./suspect --quarantine         # ./quarantine/ へ隔離してから検査
+./skill-screen --target ./suspect --quarantine=/tmp/q  # ...任意のディレクトリへ
 ```
+
+日本語の warning パターンは**既定で適用**されます（中心読者が日本語のため。オプトイン不要）。
 
 ### オプション
 
 | オプション | 意味 |
 |---|---|
 | `--target <dir>` | 検査する skill/拡張のディレクトリ（必須） |
-| `--profile <name>` | `auto`（既定）\| `agent-skill` \| `generic`（*何を検査するか* 参照） |
-| `--with-jp` | 日本語の warning パターンも適用 |
 | `--include-secret-scan` | 同梱された認証情報もスキャン（出力ではマスク） |
-| `--quarantine[=<dir>]` | verdict が `no_signal`/`scan-error` 以外のとき、対象を退避。退避先の既定は `./quarantine/`、`--quarantine=<dir>` で指定可。退避コピー名は `<basename>-<short-hash>`。退避はヒューリスティックな処置であって有罪の証明ではない — 削除前に確認のこと。 |
+| `--quarantine[=<dir>]` | 対象を**先に隔離してから**検査する（move aside → 隔離先を走査）。退避先の既定は `./quarantine/`、`--quarantine=<dir>` で指定可。フラグ無しの既定は非破壊（その場で走査・read-only）。clean でも自動昇格しない — インストールするなら自分で戻す。隔離先が既存なら上書きせず `exit 3`。隔離は封じ込めであって有罪の証明ではない。 |
 | `--json` | サマリでなく machine-readable な JSON を出力 |
 
 必要なもの: `bash`、`grep`、`sha256sum`、`timeout`（coreutils）。`jq` があれば JSON が整形
@@ -116,10 +112,11 @@ bin/skill-screen --target ./suspect --quarantine=/tmp/q  # ...任意のディレ
 A local, transparent pre-install safety screen for third-party AI agent skills
 (Claude Code and OpenAI Codex, the shared `SKILL.md` format). It scans every file in
 the directory — not just the skill itself, but any instruction files an agent reads
-(`SKILL.md` / `AGENTS.md` / `CLAUDE.md`, etc.) and scripts too.
+(`SKILL.md` / `AGENTS.md` / `CLAUDE.md`, etc.) and scripts too. **The whole tool is a
+single script, `skill-screen`**, readable top to bottom.
 
 > Status: tested core. The Stage 1 engine and the labeled corpus pass the full
-> dry-run suite (`tests/test-scan.sh`); the license is MIT. Not yet published —
+> dry-run suite (`test-scan.sh`); the license is MIT. Not yet published —
 > a companion write-up is in progress.
 
 ## Why
@@ -133,8 +130,10 @@ skill you install yourself.
 
 - **Local-complete** — it never sends your skill anywhere. Everything runs on your
   machine. No account, no upload, no telemetry.
-- **Transparent** — the entire detection logic is plain `grep` patterns you can read
-  in `lib/patterns.sh`. There is no model and no black box in the mechanical stage.
+- **Transparent** — the entire detection logic lives in the single `skill-screen`
+  file: the **(1) DETECTION RULES** section (readable `grep` patterns) and the
+  **(2) INSPECTION** section (`_skc_grep`) that applies them to every file. No model,
+  no black box in the mechanical stage. To change a rule, edit section (1).
 
 Other skill/agent scanners exist — some are open source — but they typically need an
 account and send your skills' names or metadata to a cloud service to run their checks.
@@ -144,16 +143,16 @@ in one file you can read, and nothing — no skill, no metadata — ever leaves 
 
 ## How it works — inspection and interpretation are separate
 
-1. **Stage 1 (mechanical, `grep`)** — `bin/skill-screen` walks the skill directory and
+1. **Stage 1 (mechanical, `grep`)** — `skill-screen` walks the skill directory and
    matches a fixed, readable set of prompt-injection / risky-behavior patterns. It
    emits a machine-readable JSON verdict. High recall by design (it flags candidates;
    it does not decide intent).
-2. **Stage 2 (interpretation, optional)** — hand `prompts/stage2-interpret.md` plus the
+2. **Stage 2 (interpretation, optional)** — hand `stage2-interpret.md` plus the
    Stage 1 JSON to an LLM (or read it yourself) to separate true positives from skills
    that merely *document* attacks. The prompt treats the skill as data and is
    instructed not to follow any instructions inside it.
 
-### What it inspects (scope & profiles)
+### What it inspects (scan scope)
 
 - Every file is scanned, not just `SKILL.md`. Stage 1 walks the whole target and
   greps *every* non-denylisted file — including the skill's own scripts and executables
@@ -163,14 +162,7 @@ in one file you can read, and nothing — no skill, no metadata — ever leaves 
   scan by file type is deliberately *not* done — that would let a payload hide in an
   unexpected file. (Denylisted noise such as `.git/`, `node_modules/`, `.env` is skipped;
   binaries are hashed but not pattern-scanned — see *Limitations*.)
-- Profiles are auto-detected (override with `--profile`). A profile only affects the
-  auto-detection label — never the `role` labels nor *which* files are scanned (`role`
-  is decided by extension alone and is profile-independent):
-  - `agent-skill` — a `SKILL.md` is present at the top level. `SKILL.md` is the open
-    agent skills spec used by both Claude Code and OpenAI Codex, so a skill from
-    either tool uses this profile.
-  - `generic` — anything else; scan everything, classify by extension only.
-
+- The `role` (`instruction` / `executable` / `other`) is decided by extension alone.
   No tool's own instruction filename (Codex's `AGENTS.md`, Claude Code's `CLAUDE.md`,
   etc.) is special-cased. All of them are scanned, and `*.md` / `*.txt` files are
   labelled `instruction` by extension alone — no single tool is privileged or omitted.
@@ -186,21 +178,22 @@ in one file you can read, and nothing — no skill, no metadata — ever leaves 
 ## Usage
 
 ```sh
-bin/skill-screen --target /path/to/some-skill            # human-readable verdict
-bin/skill-screen --target /path/to/some-skill --json     # machine-readable JSON
-bin/skill-screen --target ./suspect --quarantine         # move aside into ./quarantine/
-bin/skill-screen --target ./suspect --quarantine=/tmp/q  # ...into a directory you choose
+./skill-screen --target /path/to/some-skill            # human-readable verdict
+./skill-screen --target /path/to/some-skill --json     # machine-readable JSON
+./skill-screen --target ./suspect --quarantine         # isolate into ./quarantine/, then scan
+./skill-screen --target ./suspect --quarantine=/tmp/q  # ...into a directory you choose
 ```
+
+The Japanese warning patterns are applied **by default** (the primary audience is
+Japanese); there is no opt-in flag.
 
 ### Options
 
 | option | meaning |
 |---|---|
 | `--target <dir>` | directory of the skill/extension to screen (required) |
-| `--profile <name>` | `auto` (default) \| `agent-skill` \| `generic` (see *What it inspects*) |
-| `--with-jp` | also apply the Japanese warning patterns |
 | `--include-secret-scan` | also scan for shipped credentials (masked in output) |
-| `--quarantine[=<dir>]` | if the verdict is not `no_signal`/`scan-error`, move the target aside. Default destination is `./quarantine/`; pass `--quarantine=<dir>` to choose another. The moved copy is named `<basename>-<short-hash>`. Quarantine is a heuristic action, not proof of malice — review before deleting. |
+| `--quarantine[=<dir>]` | isolate the target **first**, then scan the isolated copy (move aside → scan). Default destination is `./quarantine/`; pass `--quarantine=<dir>` to choose another. Without the flag the default is non-destructive (scan in place, read-only). A clean verdict does not auto-promote it — move it back yourself if you install it. If the destination already exists it is not overwritten (`exit 3`). Quarantine is containment, not proof of malice. |
 | `--json` | print the machine-readable JSON instead of a summary |
 
 Requirements: `bash`, `grep`, `sha256sum`, `timeout` (coreutils). `jq` is used for clean

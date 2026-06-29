@@ -1,0 +1,507 @@
+#!/usr/bin/env bash
+# skill-screen — a local, transparent, single-file pre-install screen for agent skills.
+#
+# Everything is in this one file, in plain sight, in four sections:
+#   (1) DETECTION RULES   the readable grep ruleset — edit here to customise
+#   (2) INSPECTION        the one grep that checks every file against the rules
+#   (3) SCAN ENGINE       walk, hash, mask, and the fail-closed verdict (frozen core)
+#   (4) DRIVER            argument parsing, quarantine, and output
+#
+# It walks a skill/extension directory, runs the ruleset, and prints a verdict.
+# This is the MECHANICAL stage only: it surfaces candidates. For intent, hand the
+# JSON plus stage2-interpret.md to an LLM (or read it yourself).
+#
+# A verdict is NOT a safety guarantee. "no_signal" means "no rule matched", not
+# "safe". Read what it flags and use judgment.
+#
+# Dependencies: bash, grep, sha256sum, timeout (coreutils). jq is optional (clean
+# JSON; degrades to a minimal JSON if absent). No network, no remote service.
+set -u
+
+# Resolve this script's own directory (used only to locate stage2-interpret.md).
+_self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+  cat <<'EOF'
+skill-screen — local, transparent pre-install screen for agent skills.
+
+Usage:
+  skill-screen --target <dir> [options]
+
+Options:
+  --target <dir>        Directory of the skill/extension to screen (required).
+  --include-secret-scan Also scan for shipped credentials (masked in output).
+  --quarantine[=<dir>]  Isolate the target (move it aside) BEFORE scanning, then scan
+                        the isolated copy (default dir: ./quarantine/). Default without
+                        this flag is non-destructive: scan in place, read-only.
+  --json                Print the machine-readable JSON instead of a summary.
+  -h, --help            Show this help.
+
+Exit codes:  0 no_signal   1 review_needed   2 do_not_install   3 scan-error
+EOF
+}
+
+# ============================================================================
+# (1) DETECTION RULES — edit here to customise what gets flagged
+# ============================================================================
+
+# The entire detection ruleset, in plain sight.
+#
+# This is the transparency promise of skill-screen: every rule that can flag a
+# skill lives here, as a readable POSIX extended-regex (ERE). There is no hidden
+# model and no remote service in the mechanical stage. Read it, audit it, fork it.
+# To customise what gets flagged, edit the arrays below — nothing else needs to change.
+#
+# Format of each entry:  category|severity|extended-regex
+#   - category : short stable id, shown in output and used by the stage-2 prompt
+#   - severity : "blocked" (do not install) or "warning" (read before installing)
+#   - regex    : matched with `grep -nE` against each scanned file
+#
+# Design notes (why the ruleset is small and conservative):
+#   - High recall, deliberate false positives. Stage 1 flags *candidates*; a human
+#     or an LLM (stage 2) decides intent. A skill that merely *documents* an attack
+#     ("never write 'ignore previous instructions'") will match here — that is fine,
+#     stage 2 sorts it out.
+#   - Non-English (Japanese) patterns are warning-only. Vocabulary-based matching is
+#     easy to evade by rewording, so a JP hit alone never escalates to "blocked".
+#   - The list is intentionally NOT exhaustive across languages or phrasings. A
+#     screen you can fully read beats a sprawling list you can't.
+
+# Bump when the pattern set or the output shape changes (recorded in scan output;
+# used for re-check logic).
+#   v1 (initial): EN blocked 3 + EN warning 5 + JP warning 4 (JP opt-in)
+#   v2: JP warnings applied by default; "profile" field removed from JSON output
+patterns::schema_version() { echo "2"; }
+
+# BLOCKED — install-blocking. Classic prompt-injection / remote code execution.
+SKC_BLOCKED_PATTERNS=(
+  'instruction-override|blocked|(ignore|disregard) (all |any )?(previous|prior|above|earlier) (instruction|prompt|direction|rule)|forget (everything|all|your) (prior|previous|instruction|rule)|override (the )?(system|previous|prior) (prompt|instruction)'
+  'role-change|blocked|you are now (an?|the)|act as (an?|the|if)|pretend (to be|you are)|from now on,? you (are|will|must|should)|disregard your (role|persona|identity|instruction)'
+  'remote-exec|blocked|(curl|wget)[^|]*\|[[:space:]]*(sudo[[:space:]]+)?(sh|bash|zsh)([[:space:]]|$)'
+)
+
+# WARNING (English) — legitimate uses exist; surface for a human read.
+SKC_WARNING_PATTERNS=(
+  'directive-injection|warning|^[[:space:]]*(system|assistant|developer)[[:space:]]*:'
+  'secret-file-ref|warning|~/\.ssh/|~/\.aws/|/etc/(shadow|passwd)|(^|[^A-Za-z._])id_rsa([^A-Za-z]|$)|\.pem([^A-Za-z]|$)|\.p12([^A-Za-z]|$)|(^|[^A-Za-z.])\.env([^A-Za-z]|$)'
+  'net-call-added|warning|(curl|wget)[[:space:]]|fetch\(|requests\.(get|post)|urllib\.request|http\.client|nc[[:space:]]+-'
+  'suspicious-url|warning|(bit\.ly|tinyurl\.com|t\.co|is\.gd|goo\.gl|ow\.ly)/|aHR0c[A-Za-z0-9+/]{6,}'
+  'rule-reversal|warning|(always|must)[[:space:]].{0,40}(never|must[[:space:]]not)|(security[_-]?review|fact[_-]?check|brand[_-]?check)[[:space:]].{0,24}(optional|skip|disable|unnecessary|not[[:space:]]+required)'
+)
+
+# WARNING (Japanese) — applied by default (the primary audience is Japanese).
+# Severity fixed to warning (see design note: vocabulary matching is easy to reword,
+# so a JP hit alone never escalates to "blocked"). Limited to the core 4: instruction
+# override / role change / system-prompt reference / explicit role nullification.
+# No open-ended multi-language expansion.
+SKC_JP_WARNING_PATTERNS=(
+  'instruction-override-jp|warning|(これまでの|以前の|上記の|前述の)[[:space:]]*(指示|命令|指令|指図|プロンプト|ルール).{0,8}(を)?[[:space:]]*(無視|忘れ|破棄|忘却|抹消|撤回)'
+  'role-change-jp|warning|(以後|今後|これから)[[:space:]]*(あなたは|君は)'
+  'system-prompt-ref-jp|warning|システムプロンプト(を|は|について|の内容)'
+  'role-change-explicit-jp|warning|(役割|ロール|ペルソナ)[[:space:]]*(を)?[[:space:]]*(変更|変え|無効|無視)'
+)
+
+# SECRET markers — opt-in with --include-secret-scan. A skill that ships a real
+# credential is a strong "do not install" signal (and a leak risk for the author).
+# Matched values are masked before they ever appear in output (see scan.sh).
+# Lines containing a placeholder word (EXAMPLE/DUMMY/TEST/SAMPLE/PLACEHOLDER/YOUR_/
+# xxxxx) are skipped by scan.sh to cut documentation false positives.
+SKC_SECRET_PATTERNS=(
+  'aws-access-key|blocked|AKIA[0-9A-Z]{16}'
+  'github-token|blocked|ghp_[A-Za-z0-9]{36}'
+  'stripe-live|blocked|sk_live_[A-Za-z0-9]{16,}'
+  'private-key-pem|blocked|-----BEGIN ([A-Z]+ )?PRIVATE KEY-----'
+  'openai-key|blocked|sk-[A-Za-z0-9]{20,}'
+  'slack-token|blocked|xox[baprs]-[A-Za-z0-9-]{10,}'
+)
+
+# patterns::secret_patterns — emit secret marker patterns, one per line.
+patterns::secret_patterns() {
+  local p
+  for p in "${SKC_SECRET_PATTERNS[@]}"; do printf '%s\n' "$p"; done
+}
+
+# patterns::all_patterns
+# Emit every active pattern, one "category|severity|regex" per line.
+# The Japanese warning patterns are applied by default (the primary audience is
+# Japanese): there is no opt-in flag.
+patterns::all_patterns() {
+  local p
+  for p in "${SKC_BLOCKED_PATTERNS[@]}"; do printf '%s\n' "$p"; done
+  for p in "${SKC_WARNING_PATTERNS[@]}"; do printf '%s\n' "$p"; done
+  for p in "${SKC_JP_WARNING_PATTERNS[@]}"; do printf '%s\n' "$p"; done
+}
+
+# patterns::category_count — number of active patterns (for scan output).
+patterns::category_count() {
+  patterns::all_patterns | grep -c . || true
+}
+
+# ============================================================================
+# (2) INSPECTION — the single grep that checks every file against the rules above
+# ============================================================================
+
+# _skc_grep <regex> <file> -> capture matched "line:content" rows into the global
+# _SKC_MATCHES (newline-separated; empty if none) and flag a timeout. Shared by the
+# pattern and secret scan loops so the grep+timeout+rc124 skeleton lives in one place.
+# MUST be called WITHOUT command substitution: `_skc_grep ...` runs in the current
+# shell, so SKC_INCOMPLETE=1 (the fail-closed timeout flag) survives in the caller.
+# A `$(_skc_grep ...)` form would run it in a subshell and silently discard that
+# assignment, defeating fail-closed. The grep's own $() is internal and side-effect free.
+_skc_grep() {
+  local rc
+  _SKC_MATCHES="$(timeout "$SKC_GREP_TIMEOUT" grep -nIE -- "$1" "$2" 2>/dev/null)"; rc=$?
+  [ "$rc" -eq 124 ] && SKC_INCOMPLETE=1
+}
+
+# ============================================================================
+# (3) SCAN ENGINE — walk, hash, mask, fail-closed verdict (frozen core)
+# ============================================================================
+
+SKC_MATCH_CAP="${SKC_MATCH_CAP:-20}"        # max matches recorded per file+pattern
+SKC_GREP_TIMEOUT="${SKC_GREP_TIMEOUT:-15}"  # seconds per grep invocation
+SKC_EXCERPT_MAX="${SKC_EXCERPT_MAX:-200}"   # max chars of a matched line kept
+
+# Directories/files never scanned or hashed (noise + secrets, defense in depth).
+_skc_is_denied() {
+  case "$1" in
+    .git/*|*/.git/*|.git) return 0 ;;
+    node_modules/*|*/node_modules/*) return 0 ;;
+    .venv/*|*/.venv/*|__pycache__/*|*/__pycache__/*) return 0 ;;
+    *.pyc) return 0 ;;
+    .env|.env.*|*/.env|*/.env.*) return 0 ;;
+  esac
+  return 1
+}
+
+# scan::list_files <dir> -> relative paths (one per line), denylist applied.
+# Runs in a subshell when used in $(...) / <(...), so it cannot set a parent global.
+# Instead, if SKC_BADNAME_FLAG points to a file, it appends a byte there whenever a
+# path with a control char (or embedded newline) is seen — an evasion red flag the
+# caller checks after the scan.
+scan::list_files() {
+  local dir="$1" rel real base
+  # Include symlinks (-type l): a skill whose SKILL.md is a symlink pointing OUTSIDE
+  # the target would otherwise look in-tree yet never be scanned (find -type f skips
+  # links) = an evaluation bypass. We resolve each
+  # symlink: if it stays inside the target and is a regular file, scan it; if it
+  # escapes the target (or can't be resolved), flag it (red flag) and never read it
+  # (no path traversal out of the target).
+  while IFS= read -r -d '' rel; do
+    rel="${rel#./}"
+    [ -z "$rel" ] && continue
+    _skc_is_denied "$rel" && continue
+    case "$rel" in
+      *[$'\001'-$'\037']*)
+        [ -n "${SKC_BADNAME_FLAG:-}" ] && printf 1 >> "$SKC_BADNAME_FLAG"
+        continue ;;
+    esac
+    if [ -L "$dir/$rel" ]; then
+      real="" ; base=""
+      if command -v realpath >/dev/null 2>&1; then
+        real="$(realpath -m -- "$dir/$rel" 2>/dev/null)"
+        base="$(realpath -m -- "$dir" 2>/dev/null)"
+      fi
+      if [ -n "$real" ] && { [ "$real" = "$base" ] || case "$real" in "$base"/*) true ;; *) false ;; esac; }; then
+        [ -f "$dir/$rel" ] && printf '%s\n' "$rel"   # in-tree regular file: scan it
+      else
+        [ -n "${SKC_BADNAME_FLAG:-}" ] && printf 1 >> "$SKC_BADNAME_FLAG"  # escapes target
+      fi
+      continue
+    fi
+    printf '%s\n' "$rel"
+  done < <(cd "$dir" 2>/dev/null && find . \( -type f -o -type l \) -print0 2>/dev/null)
+}
+
+# _skc_content_hash_from_list <dir> <list_file> -> "sha256:<hex>" over
+# (relpath + US + sha256(content)), LC_ALL=C-sorted for determinism. <list_file> is a
+# precomputed scan::list_files output (one relpath per line). sha256sum is wrapped in
+# timeout so a pathological file cannot hang the fingerprint; a partial hash is NOT
+# wired to SKC_INCOMPLETE (content_hash is an identity, not a detection signal).
+_skc_content_hash_from_list() {
+  local dir="$1" list="$2" rel sum
+  command -v sha256sum >/dev/null 2>&1 || { echo "sha256:unavailable"; return 0; }
+  sum="$(LC_ALL=C sort "$list" | while IFS= read -r rel; do
+    printf '%s\037%s\n' "$rel" "$(timeout "$SKC_GREP_TIMEOUT" sha256sum "$dir/$rel" 2>/dev/null | cut -d' ' -f1)"
+  done | sha256sum | cut -d' ' -f1)"
+  echo "sha256:$sum"
+}
+
+# _skc_redact <string> -> mask any secret-pattern match (upholds the masking
+# invariant for the hits excerpt channel, not just secret_hits). A secret can ride
+# on a line that matches a warning pattern (e.g. an Authorization header on a
+# net-call line); without this, the raw token would land verbatim in hits[].excerpt.
+_skc_redact() {
+  local s="$1" entry regex
+  if declare -F patterns::secret_patterns >/dev/null 2>&1; then
+    while IFS= read -r entry; do
+      regex="${entry##*|}"
+      [ -z "$regex" ] && continue
+      s="$(printf '%s' "$s" | sed -E "s/${regex}/[REDACTED-SECRET]/g" 2>/dev/null || printf '%s' "$s")"
+    done < <(patterns::secret_patterns)
+  fi
+  printf '%s' "$s"
+}
+
+# _skc_sanitize <string> -> printable, delimiter-free, secret-masked, truncated.
+# Truncation uses bash substring (character-based under a UTF-8 locale) to avoid
+# cutting a multibyte character in half, which could yield invalid UTF-8 and break
+# the downstream `jq -R`.
+_skc_sanitize() {
+  local s
+  s="$(printf '%s' "$1" | tr -d '\000-\037')"
+  s="$(_skc_redact "$s")"
+  printf '%s' "${s:0:$SKC_EXCERPT_MAX}"
+}
+
+# _skc_has_placeholder <line> -> 0 if the line looks like docs/example (skip secret hit)
+_skc_has_placeholder() {
+  printf '%s' "$1" | grep -qiE 'EXAMPLE|DUMMY|TEST|SAMPLE|PLACEHOLDER|YOUR_|<your-|xxxxx'
+}
+
+# _skc_mask <token> -> first 4 chars + "***" (raw secret never leaves the function)
+_skc_mask() {
+  printf '%s***' "$(printf '%s' "$1" | cut -c1-4)"
+}
+
+# _skc_role <relpath> -> prints: instruction | executable | other
+# Classification is by path/extension only; advisory context for the output.
+# Instruction-like files (any *.md / *.txt) are labelled "instruction" — this covers
+# SKILL.md, AGENTS.md, CLAUDE.md and any other prose an agent might read, symmetrically.
+# No tool's instruction filename is special-cased: every file is scanned regardless
+# ("scan superset"), and roles are derived from the extension alone.
+_skc_role() {
+  case "$1" in
+    *.sh|*.bash|*.zsh|*.fish|*.js|*.mjs|*.cjs|*.ts|*.py|*.rb|*.pl|*.php)
+      echo "executable"; return 0 ;;
+    *.md|*.txt)
+      echo "instruction"; return 0 ;;
+  esac
+  echo "other"
+}
+
+
+# _skc_emit_json <dir> <content_hash> <files> <patterns> <signal>
+#                <hits_tmp> <secret_tmp>  -> JSON on stdout.
+# Uses jq when present; otherwise emits a minimal, still-valid degraded object.
+_skc_emit_json() {
+  local dir="$1" chash="$2" files="$3" pcount="$4" signal="$5"
+  local hits_tmp="$6" secret_tmp="$7"
+  local ts; ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)"
+
+  if command -v jq >/dev/null 2>&1; then
+    local hits_json secret_json
+    hits_json="$(jq -R -s '
+      split("\n") | map(select(length>0)) | map(split(""))
+      | map({category:.[0], severity:.[1], file:.[2],
+             line:((.[3]|tonumber?) // .[3]), role:.[4], excerpt:.[5]})' "$hits_tmp")"
+    secret_json="$(jq -R -s '
+      split("\n") | map(select(length>0)) | map(split(""))
+      | map({category:.[0], file:.[1], line:((.[2]|tonumber?) // .[2]), masked:.[3]})' "$secret_tmp")"
+    jq -n \
+      --arg sv "$(patterns::schema_version)" --arg td "$dir" \
+      --arg ch "$chash" --argjson fs "${files:-0}" --argjson pc "${pcount:-0}" \
+      --arg sig "$signal" --argjson hits "$hits_json" --argjson secrets "$secret_json" \
+      --arg ts "$ts" \
+      '{schema_version:$sv, tool:"skill-screen", target_dir:$td,
+        content_hash:$ch, files_scanned:$fs, pattern_count:$pc,
+        candidate_signal:$sig, hits:$hits, secret_hits:$secrets, scanned_at:$ts}'
+  else
+    # Degraded path: no jq. Counts only, no per-hit detail (still valid JSON).
+    # grep -c prints "0" and exits 1 on no match; `|| true` keeps that "0" without
+    # appending a second one (the earlier `|| echo 0` produced a stray "0\n0").
+    local nhits nsec dir_esc
+    nhits="$(grep -c . "$hits_tmp" 2>/dev/null || true)"; nhits="${nhits:-0}"
+    nsec="$(grep -c . "$secret_tmp" 2>/dev/null || true)"; nsec="${nsec:-0}"
+    # target_dir is operator-controlled; escape \ and " and drop control chars so a
+    # crafted directory name cannot break the JSON in this hand-built path.
+    dir_esc="$(printf '%s' "$dir" | tr -d '\000-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+    printf '{"schema_version":"%s","tool":"skill-screen","target_dir":"%s",' \
+      "$(patterns::schema_version)" "$dir_esc"
+    printf '"content_hash":"%s","files_scanned":%s,"pattern_count":%s,' \
+      "$chash" "${files:-0}" "${pcount:-0}"
+    printf '"candidate_signal":"%s","hits_count":%s,"secret_hits_count":%s,' \
+      "$signal" "$nhits" "$nsec"
+    printf '"degraded":"jq not found: counts only","scanned_at":"%s"}\n' "$ts"
+  fi
+}
+
+# scan::run <dir> <secret:0|1> <json_out_path>
+# Writes the result JSON to <json_out_path> and sets global SKC_SIGNAL to one of:
+#   no_signal | review_needed | do_not_install | scan-error
+scan::run() {
+  local dir="$1" secret="$2" out="$3"
+  SKC_SIGNAL="scan-error"
+  SKC_INCOMPLETE=0
+
+  if [ ! -d "$dir" ]; then
+    _skc_emit_json "$dir" "sha256:unavailable" 0 0 "scan-error" /dev/null /dev/null > "$out"
+    return 0
+  fi
+
+  local hits_tmp secret_tmp files_tmp
+  hits_tmp="$(mktemp)"; secret_tmp="$(mktemp)"; files_tmp="$(mktemp)"
+  SKC_BADNAME_FLAG="$(mktemp)"
+  # Clean every temp on any return path. Set AFTER the mktemps so the missing-dir
+  # early return above (which runs before any temp exists) never fires it. RETURN
+  # traps set inside a function are function-scoped (no functrace) = no leak to
+  # callers (verified).
+  trap 'rm -f "$hits_tmp" "$secret_tmp" "$files_tmp" "$SKC_BADNAME_FLAG"' RETURN
+
+  # Walk the directory exactly once; reuse the cached list for the file count, the
+  # content hash, and the scan loop (previously three separate walks).
+  scan::list_files "$dir" > "$files_tmp"
+  local files_scanned content_hash pattern_count
+  files_scanned="$(grep -c . "$files_tmp" || true)"
+  content_hash="$(_skc_content_hash_from_list "$dir" "$files_tmp")"
+  pattern_count="$(patterns::category_count)"
+
+  local rel entry category rest severity regex line content excerpt role
+  while IFS= read -r rel; do
+    while IFS= read -r entry; do
+      [ -z "$entry" ] && continue
+      category="${entry%%|*}"; rest="${entry#*|}"
+      severity="${rest%%|*}"; regex="${rest#*|}"
+      _skc_grep "$regex" "$dir/$rel"
+      [ -z "$_SKC_MATCHES" ] && continue
+      printf '%s\n' "$_SKC_MATCHES" | head -n "$SKC_MATCH_CAP" | while IFS= read -r m; do
+        [ -z "$m" ] && continue
+        line="${m%%:*}"; content="${m#*:}"
+        excerpt="$(_skc_sanitize "$content")"
+        role="$(_skc_role "$rel")"
+        printf '%s\037%s\037%s\037%s\037%s\037%s\n' \
+          "$category" "$severity" "$rel" "$line" "$role" "$excerpt" >> "$hits_tmp"
+      done
+    done < <(patterns::all_patterns)
+
+    if [ "$secret" = 1 ]; then
+      while IFS= read -r entry; do
+        [ -z "$entry" ] && continue
+        category="${entry%%|*}"; rest="${entry#*|}"; regex="${rest#*|}"
+        _skc_grep "$regex" "$dir/$rel"
+        [ -z "$_SKC_MATCHES" ] && continue
+        printf '%s\n' "$_SKC_MATCHES" | head -n "$SKC_MATCH_CAP" | while IFS= read -r m; do
+          [ -z "$m" ] && continue
+          line="${m%%:*}"; content="${m#*:}"
+          _skc_has_placeholder "$content" && continue
+          local token; token="$(printf '%s' "$content" | grep -oE -- "$regex" 2>/dev/null | head -n1)"
+          printf '%s\037%s\037%s\037%s\n' \
+            "$category" "$rel" "$line" "$(_skc_mask "$token")" >> "$secret_tmp"
+        done
+      done < <(patterns::secret_patterns)
+    fi
+  done < "$files_tmp"
+
+  # signal: fail-closed on incomplete scan or control-char/escaping filenames.
+  # severity is field 2 (US-delimited); awk -F'\037' interprets the octal escape,
+  # whereas grep would not treat \037 as the US byte. If awk is unavailable we
+  # fail closed: any hit at all is treated as blocked rather than silently downgraded.
+  local has_blocked=0
+  if command -v awk >/dev/null 2>&1; then
+    awk -F'\037' '$2=="blocked"{found=1} END{exit(found?0:1)}' "$hits_tmp" 2>/dev/null && has_blocked=1
+  elif [ -s "$hits_tmp" ]; then
+    has_blocked=1
+  fi
+  local signal="no_signal"
+  if [ -s "$secret_tmp" ] || [ "$has_blocked" = 1 ] \
+     || [ "$SKC_INCOMPLETE" = 1 ] || [ -s "$SKC_BADNAME_FLAG" ]; then
+    signal="do_not_install"
+  elif [ -s "$hits_tmp" ]; then
+    signal="review_needed"
+  fi
+  SKC_SIGNAL="$signal"
+
+  _skc_emit_json "$dir" "$content_hash" "$files_scanned" \
+    "$pattern_count" "$signal" "$hits_tmp" "$secret_tmp" > "$out"
+  # temps removed by the RETURN trap set at the top of this function.
+}
+
+# ============================================================================
+# (4) DRIVER — argument parsing, quarantine, output
+# ============================================================================
+
+target="" ; secret=0 ; want_json=0
+quarantine=0 ; quarantine_dir=""
+
+need_val() { [ "$1" -ge 2 ] || { printf 'skill-screen: %s requires a value\n' "$2" >&2; exit 3; }; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --target) need_val "$#" --target; target="$2"; shift 2 ;;
+    --target=*) target="${1#*=}"; shift ;;
+    --include-secret-scan) secret=1; shift ;;
+    --quarantine) quarantine=1; shift ;;
+    --quarantine=*) quarantine=1; quarantine_dir="${1#*=}"; shift ;;
+    --json) want_json=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) printf 'skill-screen: unknown argument: %s\n' "$1" >&2; usage >&2; exit 3 ;;
+  esac
+done
+
+if [ -z "$target" ]; then
+  printf 'skill-screen: --target <dir> is required\n' >&2; usage >&2; exit 3
+fi
+
+# --- quarantine (opt-in): isolate FIRST, then scan the isolated copy ---
+# skill-screen never executes the target, so "quarantine" means containment, not a
+# sandbox: move the directory aside (out of any auto-load path) BEFORE inspecting it.
+# Default (no flag) is non-destructive — scan in place, read-only. A clean verdict
+# does NOT auto-promote a quarantined item; move it back yourself if you install it.
+# Fail-closed: if containment was requested but cannot be done (mkdir/mv fails, or
+# the destination exists), we exit 3 rather than silently scanning in place — the
+# whole point of asking for quarantine is to NOT leave the target where it was.
+if [ "$quarantine" = 1 ] && [ -d "$target" ]; then
+  : "${quarantine_dir:=$PWD/quarantine}"
+  dest="$quarantine_dir/$(basename -- "$target")"
+  if [ -e "$dest" ]; then
+    printf 'skill-screen: quarantine destination already exists: %s\n' "$dest" >&2
+    printf '  refusing to overwrite an existing quarantined item.\n' >&2
+    exit 3
+  fi
+  if ! mkdir -p "$quarantine_dir" 2>/dev/null; then
+    printf 'skill-screen: could not create quarantine dir %s; refusing to scan uncontained (fail-closed)\n' "$quarantine_dir" >&2
+    exit 3
+  fi
+  if mv -- "$target" "$dest" 2>/dev/null; then
+    target="$dest"
+    printf 'quarantined: moved to %s (scanning the isolated copy)\n' "$dest" >&2
+    printf 'NOTE: quarantine is containment, not proof of malice. Review before deleting.\n' >&2
+  else
+    printf 'skill-screen: quarantine move failed; refusing to scan uncontained (fail-closed)\n' >&2
+    exit 3
+  fi
+fi
+
+json_out="$(mktemp)"
+trap 'rm -f "$json_out"' EXIT
+
+scan::run "$target" "$secret" "$json_out"
+signal="$SKC_SIGNAL"
+
+# --- output ---
+if [ "$want_json" = 1 ]; then
+  cat "$json_out"
+else
+  printf 'skill-screen  verdict=%s\n' "$signal"
+  case "$signal" in
+    no_signal)      printf '  No rule matched. This is NOT a proof of safety.\n' ;;
+    review_needed)  printf '  Warning-level matches. Read them before installing:\n' ;;
+    do_not_install) printf '  Blocked-level matches (or a scan red flag). Do not install as-is:\n' ;;
+    scan-error)     printf '  Could not scan the target (missing dir?).\n' ;;
+  esac
+  if [ "$signal" = "review_needed" ] || [ "$signal" = "do_not_install" ]; then
+    if command -v jq >/dev/null 2>&1; then
+      jq -r '.hits[]? | "    [\(.severity)] \(.category)  \(.file):\(.line)"' "$json_out" 2>/dev/null | sort -u
+      jq -r '.secret_hits[]? | "    [secret] \(.category)  \(.file):\(.line)  \(.masked)"' "$json_out" 2>/dev/null
+    else
+      printf '    (install jq for a per-hit breakdown; run with --json for raw output)\n'
+    fi
+    printf '  Next: hand this output + %s/stage2-interpret.md to an LLM for intent.\n' "$_self_dir"
+  fi
+fi
+
+case "$signal" in
+  no_signal) exit 0 ;;
+  review_needed) exit 1 ;;
+  do_not_install) exit 2 ;;
+  *) exit 3 ;;
+esac

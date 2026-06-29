@@ -5,7 +5,7 @@ malicious/remote-exec	-	do_not_install	malicious_tp	curl|bash installer
 malicious/secret-exfil	-	review_needed	malicious_tp	warnings only at stage1; stage2 blocks (ssh/aws exfil)
 malicious/suspicious-url	-	review_needed	malicious_tp	bit.ly + base64 blob
 malicious/rule-reversal	-	review_needed	malicious_tp	makes security-review optional
-malicious/jp-injection	--with-jp	review_needed	malicious_tp	Japanese injection (needs --with-jp)
+malicious/jp-injection	-	review_needed	malicious_tp	Japanese injection (JP patterns on by default)
 malicious/shipped-secret	--include-secret-scan	do_not_install	malicious_tp	ships a (fake) AWS key
 benign/normal-formatter	-	no_signal	benign_clean	plain formatter, no triggers
 benign/data-helper	-	no_signal	benign_clean	reads config.json, no triggers

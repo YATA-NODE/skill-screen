@@ -7,8 +7,8 @@
 # Exit 0 = all pass, 1 = at least one failure.
 set -u
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-check="$root/bin/skill-screen"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+check="$root/skill-screen"
 expected="$root/corpus/EXPECTED.tsv"
 
 # field_of <json_file> <key> -> string value of a top-level scalar key
