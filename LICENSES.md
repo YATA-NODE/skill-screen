@@ -1,8 +1,8 @@
 # Third-party licenses
 
 `skill-screen` bundles **no third-party code**. The repository ships only its own
-source (`bin/`, `lib/`, `prompts/`, `corpus/`, `tests/`), licensed under MIT
-(see [LICENSE](LICENSE)).
+source — the single `skill-screen` script plus `SKILL.md` and `README.md` — licensed
+under MIT (see [LICENSE](LICENSE)).
 
 ## Runtime requirements (not bundled)
 

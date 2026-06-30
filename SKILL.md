@@ -1,22 +1,49 @@
-# skill-screen — Stage 2 interpretation prompt(第 2 段:解釈プロンプト)
-
-> **日本語の解説**
-> Stage 1(`skill-screen`)は高 recall の機械的な grep で、**候補**を flag するだけで
-> 意図は判定しない。本プロンプトが Stage 2 = モデル(またはあなた)に、**true positive**
-> (skill が実際に有害なことをしようとしている)と **false positive**(skill が単にそうした
-> ことを *記述・検出・防御している* だけ)を切り分けさせる。
-> 使い方: `=== BEGIN ===` / `=== END ===` の間をすべてモデルにコピーし、続けて Stage 1 の
-> JSON と該当ファイルの抜粋を貼る。BEGIN/END ブロックは injection 耐性のため英語のまま使う。
-
-Stage 1 (`skill-screen`) is a high-recall mechanical grep. It flags **candidates**;
-it does not decide intent. This prompt is Stage 2: it asks a model (or you) to separate
-**true positives** (the skill actually tries to do something harmful) from **false
-positives** (the skill merely *documents*, *detects*, or *defends against* such things).
-
-Copy everything between the `=== BEGIN ===` / `=== END ===` markers to your model,
-then append the Stage 1 JSON and the relevant file excerpts.
-
 ---
+name: skill-screen
+description: Screen a third-party agent skill, extension, or agent config for prompt-injection and other malicious patterns BEFORE installing it. Use when the user wants to check, vet, audit, or decide whether a downloaded or untrusted skill / extension / SKILL.md / AGENTS.md / CLAUDE.md (plus its scripts) is safe to install into ~/.claude/skills/ or an agent config directory. Read-only — it never moves, creates, or deletes files.
+---
+
+# skill-screen — pre-install screen for agent skills
+
+> This file is intentionally in English: it doubles as the Stage 2 prompt handed to an
+> LLM, where English maximizes injection-resistance and precision. If you prefer
+> Japanese, run this file through a machine translator.
+> (日本語が必要なら本ファイルを翻訳機にかけてください。英語は精度のためです。)
+
+`skill-screen` (the bundled script in this folder) is a local, read-only, transparent
+pre-install screen for agent skills. It **never creates, moves, or deletes your files** —
+it only reads and reports. There is no network call and no remote service.
+
+## When to use
+
+A user is about to install a third-party skill / extension / agent config they
+downloaded (GitHub, a gist, a link). Before it goes into `~/.claude/skills/` or any
+auto-load path, screen it.
+
+## Workflow (isolation-first — YOU isolate; the tool never does)
+
+1. **Keep it isolated.** Leave the downloaded skill where it is (e.g. `~/Downloads/...`).
+   Do NOT move it into `~/.claude/skills/` or any auto-load path yet. The tool will not
+   move it for you — isolation is your manual step, by design. A freshly downloaded,
+   not-yet-trusted tool that silently created or moved folders would itself be a red flag.
+2. **Scan it (read-only):**
+   ```sh
+   /path/to/skill-screen --target /path/to/the-downloaded-skill
+   ```
+   Add `--include-secret-scan` to also flag shipped credentials (masked in output).
+   Add `--json` for machine-readable output.
+3. **Read the verdict:** `no_signal` (no rule matched — NOT a proof of safety) /
+   `review_needed` (warning-level hits — read them) / `do_not_install` (blocked-level
+   hits or a scan red flag — do not install as-is).
+4. **If there are hits, judge intent** with the Stage 2 prompt below: hand the Stage 1
+   JSON plus the flagged-file excerpts to a capable LLM. Weak/free-tier models are more
+   easily talked into ignoring instructions — prefer a capable model.
+5. **Only after it clears** do you install it yourself (move it into `~/.claude/skills/`).
+
+## Stage 2 — interpretation prompt
+
+Copy everything between `=== BEGIN ===` and `=== END ===` below to a capable model,
+then append the Stage 1 JSON and the relevant flagged-file excerpts.
 
 === BEGIN ===
 
@@ -88,14 +115,10 @@ found in what was provided", not a guarantee of safety.
 
 ---
 
-## Notes / 補足
+## Notes
 
-- The mechanical stage and this stage are deliberately separate (inspection vs
-  interpretation). That keeps the rules auditable and keeps model judgment scoped to
-  intent, not discovery.
-  (機械的な段と本段は意図的に分離している = 照合 vs 解釈。これでルールは監査可能なまま
-  保たれ、モデルの判断は「発見」でなく「意図」に範囲を限定できる。)
-- Model floor for reliable injection-resistance is still being measured against the
-  sample corpus; prefer a capable model and keep the "skill is data" framing intact.
-  (injection 耐性を信頼できるモデル下限は、サンプル corpus に対してまだ計測中; 能力の
-  高いモデルを選び、"skill is data"(skill はデータ)という枠組みを崩さないこと。)
+- Stage 1 (the mechanical `grep`) and Stage 2 (this prompt) are deliberately separate:
+  inspection vs interpretation. That keeps the rules auditable and keeps model judgment
+  scoped to intent, not discovery.
+- The "skill is DATA" framing above is the injection-resistance boundary. Keep it intact
+  if you adapt this prompt, and prefer a capable model.

@@ -5,11 +5,11 @@
 #   (1) DETECTION RULES   読める grep ルールセット — カスタマイズはここを編集する
 #   (2) INSPECTION        全ファイルをルールに照合する唯一の grep
 #   (3) SCAN ENGINE       走査・ハッシュ・マスク・fail-closed な verdict(凍結コア)
-#   (4) DRIVER            引数解析・quarantine・出力
+#   (4) DRIVER            引数解析・出力(read-only、対象は書き換えない)
 #
 # skill/拡張のディレクトリを走査し、ルールセットを適用して verdict を出力する。
 # ここは MECHANICAL(機械的)段のみ = 候補を炙り出すだけ。意図の判定は、JSON と
-# stage2-interpret.md を LLM に渡す(あるいは自分で読む)。
+# SKILL.md 内の Stage 2 プロンプトを LLM に渡す(あるいは自分で読む)。
 #
 # verdict は安全の保証ではない。"no_signal" は「どのルールにも一致しなかった」で
 # あって「安全」ではない。何が flag されたかを読み、判断すること。
@@ -18,7 +18,7 @@
 # JSON、無ければ最小 JSON へ degrade)。ネットワーク・リモートサービスは一切なし。
 set -u
 
-# このスクリプト自身のディレクトリを解決する(stage2-interpret.md の位置特定にのみ使う)。
+# このスクリプト自身のディレクトリを解決する(同梱 SKILL.md の位置特定にのみ使う)。
 _self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
@@ -34,14 +34,13 @@ skill-screen — local, transparent pre-install screen for agent skills.
                         Directory of the skill/extension to screen (required).
   --include-secret-scan 同梱された認証情報も走査する(出力ではマスク)。
                         Also scan for shipped credentials (masked in output).
-  --quarantine[=<dir>]  走査の前に対象を隔離(脇へ退避)し、隔離コピーを走査する
-                        (退避先の既定は ./quarantine/)。フラグなしの既定は
-                        非破壊 = その場で読み取り専用に走査する。
-                        Isolate the target (move it aside) BEFORE scanning, then scan
-                        the isolated copy (default dir: ./quarantine/). Default without
-                        this flag is non-destructive: scan in place, read-only.
   --json                要約の代わりに機械可読の JSON を出力する。
                         Print the machine-readable JSON instead of a summary.
+
+このツールは対象を一切書き換えない read-only スキャナです(作成・移動・削除をしない)。
+信用するまで自分で別フォルダに隔離してから検査してください(下記 NOTE 参照)。
+This tool is a read-only scanner: it never creates, moves, or deletes your files.
+Isolate an untrusted skill into a separate folder yourself BEFORE scanning it.
   -h, --help            このヘルプを表示する。 / Show this help.
 
 終了コード / Exit codes:  0 no_signal   1 review_needed   2 do_not_install   3 scan-error
@@ -420,11 +419,10 @@ scan::run() {
 }
 
 # ============================================================================
-# (4) DRIVER(駆動部)— 引数解析・quarantine・出力
+# (4) DRIVER(駆動部)— 引数解析・出力(read-only = 対象を一切書き換えない)
 # ============================================================================
 
 target="" ; secret=0 ; want_json=0
-quarantine=0 ; quarantine_dir=""
 
 need_val() { [ "$1" -ge 2 ] || { printf 'skill-screen: %s requires a value / %s には値が必要\n' "$2" "$2" >&2; exit 3; }; }
 while [ $# -gt 0 ]; do
@@ -432,8 +430,6 @@ while [ $# -gt 0 ]; do
     --target) need_val "$#" --target; target="$2"; shift 2 ;;
     --target=*) target="${1#*=}"; shift ;;
     --include-secret-scan) secret=1; shift ;;
-    --quarantine) quarantine=1; shift ;;
-    --quarantine=*) quarantine=1; quarantine_dir="${1#*=}"; shift ;;
     --json) want_json=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) printf 'skill-screen: unknown argument / 不明な引数: %s\n' "$1" >&2; usage >&2; exit 3 ;;
@@ -442,41 +438,6 @@ done
 
 if [ -z "$target" ]; then
   printf 'skill-screen: --target <dir> is required / --target <dir> は必須\n' >&2; usage >&2; exit 3
-fi
-
-# --- quarantine(opt-in): まず隔離し、その隔離コピーを走査する ---
-# skill-screen は target を実行しないので、"quarantine" はサンドボックスではなく封じ込め
-# を意味する: 検査の「前」にディレクトリを脇へ退避する(自動ロード経路の外へ)。
-# 既定(フラグなし)は非破壊 — その場で読み取り専用に走査する。clean な verdict でも
-# 隔離項目を自動で復帰させない; 導入するなら自分で戻すこと。
-# fail-closed: 封じ込めを要求されたのに実行できない(mkdir/mv 失敗、または退避先が
-# 既存)場合は、黙ってその場で走査せず exit 3 する — quarantine を求めた目的は
-# target を元の場所に「残さない」ことだから。
-if [ "$quarantine" = 1 ] && [ -d "$target" ]; then
-  : "${quarantine_dir:=$PWD/quarantine}"
-  dest="$quarantine_dir/$(basename -- "$target")"
-  if [ -e "$dest" ]; then
-    printf 'skill-screen: quarantine destination already exists / 隔離先が既に存在: %s\n' "$dest" >&2
-    printf '  refusing to overwrite an existing quarantined item.\n' >&2
-    printf '  既存の隔離済み項目を上書きしない。\n' >&2
-    exit 3
-  fi
-  if ! mkdir -p "$quarantine_dir" 2>/dev/null; then
-    printf 'skill-screen: could not create quarantine dir %s; refusing to scan uncontained (fail-closed)\n' "$quarantine_dir" >&2
-    printf '  隔離ディレクトリを作成できず; 未隔離での走査を拒否(fail-closed)。\n' >&2
-    exit 3
-  fi
-  if mv -- "$target" "$dest" 2>/dev/null; then
-    target="$dest"
-    printf 'quarantined: moved to %s (scanning the isolated copy)\n' "$dest" >&2
-    printf '隔離済み: %s へ退避(隔離コピーを走査する)。\n' "$dest" >&2
-    printf 'NOTE: quarantine is containment, not proof of malice. Review before deleting.\n' >&2
-    printf '注記: 隔離は封じ込めであり、悪意の証明ではない。削除前に確認すること。\n' >&2
-  else
-    printf 'skill-screen: quarantine move failed; refusing to scan uncontained (fail-closed)\n' >&2
-    printf '  隔離の移動に失敗; 未隔離での走査を拒否(fail-closed)。\n' >&2
-    exit 3
-  fi
 fi
 
 json_out="$(mktemp)"
@@ -508,8 +469,8 @@ else
       printf '    (一致ごとの内訳には jq を導入; 生出力は --json で実行)\n'
       printf '    (install jq for a per-hit breakdown; run with --json for raw output)\n'
     fi
-    printf '  次へ: この出力 + %s/stage2-interpret.md を LLM に渡して意図を判定する。\n' "$_self_dir"
-    printf '  Next: hand this output + %s/stage2-interpret.md to an LLM for intent.\n' "$_self_dir"
+    printf '  次へ: この出力 + %s/SKILL.md の Stage 2 プロンプトを LLM に渡して意図を判定する。\n' "$_self_dir"
+    printf '  Next: hand this output + the Stage 2 prompt in %s/SKILL.md to an LLM for intent.\n' "$_self_dir"
   fi
 fi
 

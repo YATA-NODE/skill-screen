@@ -1,171 +1,54 @@
 # skill-screen
 
-> 日本語 → English（同じ内容を日本語・英語の順で記載 / same content, Japanese first then English）
+> This README is in English for precision. Prefer Japanese? Run it through a machine
+> translator. (日本語が必要なら翻訳機にかけてください。精度のため英語で書いています。)
 
-サードパーティ製の AI エージェント skill（Claude Code / OpenAI Codex、共通の `SKILL.md` 形式）を、
-インストール前にチェックする、ローカル完結・透明な安全スクリーン。skill 本体だけでなく、
-エージェントが読む指示ファイル（`SKILL.md` / `AGENTS.md` / `CLAUDE.md` 等）やスクリプトも含め、
-ディレクトリ内の全ファイルを検査します。**本体は単一スクリプト `skill-screen` 1 ファイル**で、
-上から読めば「何を・どこで検査しているか」が分かります。
-
-> ステータス: コアはテスト済み。Stage 1 エンジンとラベル付きコーパスは dry-run スイート
-> （`test-scan.sh`）を全て通過、ライセンスは MIT。未公開 — 解説記事を準備中。
-
-## なぜ作ったか
-
-GitHub や gist で見つけた skill を `~/.claude/skills/` に入れる時点で、その `SKILL.md` と
-スクリプトに、あなたのエージェントができること全てを託すことになります。公式マーケット
-プレイスは自分たちの掲載物は審査しますが、自分で入れる skill を検査する仕組みは用意されて
-いません。
-
-`skill-screen` はその隙間を、2 つの意図的な性質で埋めます:
-
-- **ローカル完結（Local-complete）** — skill をどこにも送信しません。全てあなたのマシン上で
-  動きます。アカウント不要・アップロードなし・テレメトリなし。
-- **透明（Transparent）** — 検出ロジックの全ては単一ファイル `skill-screen` の
-  **① DETECTION RULES** 節（読める `grep` パターン）と、それを全ファイルに当てる
-  **② INSPECTION** 節（`_skc_grep`）に書かれています。機械的ステージにモデルもブラック
-  ボックスもありません。ルールを変えたいときは ① を編集するだけです。
-
-既存の skill/agent スキャナ（OSS のものもあります）は、検査のためにアカウント登録や、スキル名・
-メタデータのクラウド送信を必要とすることが多いです。`skill-screen` は機能数でそれらと張り合い
-ません。要点は信頼です — 検出ルールは 1 ファイルで全部読め、スキルもメタデータも一切ラップ
-トップの外に出ません（アカウント不要）。
-
-## 仕組み — 検査と解釈の分離
-
-1. **Stage 1（機械的、`grep`）** — `skill-screen` が skill ディレクトリを走査し、固定
-   された読めるルールセット（prompt-injection / 危険な振る舞い）を照合。machine-readable な
-   JSON verdict を出力。設計上 高 recall（候補を挙げるだけで、意図は判断しない）。
-2. **Stage 2（解釈、任意）** — `stage2-interpret.md` と Stage 1 の JSON を LLM に渡す
-   （または自分で読む）ことで、true positive と「攻撃を*説明しているだけ*の skill」を切り分け
-   る。プロンプトは skill をデータとして扱い、その中の指示には従わないよう指示されている。
-
-### 何を検査するか（走査範囲）
-
-- `SKILL.md` だけでなく、全ファイルを検査します。Stage 1 は対象全体を走査し、denylist 以外の
-  *全*ファイルを grep します — skill 自身のスクリプトや実行ファイル（`.sh` / `.py` / `.js` …）
-  も含みます（`curl|bash` インストーラや認証情報の流出は、たいていコード側に潜むため）。各 hit
-  には `role`（`instruction` / `executable` / `other`）が付与され、prose 由来かコード由来かが
-  分かります。ファイル型で走査を絞ることは意図的にしません — payload を予期せぬファイル型に
-  隠させてしまうからです。（`.git/` / `node_modules/` / `.env` 等の denylist ノイズは除外。
-  バイナリは hash 化のみで pattern 走査外 — *制限事項* 参照。）
-- `role`（`instruction` / `executable` / `other`）は拡張子だけで決まります。どのツール固有の
-  指示ファイル名（Codex の `AGENTS.md`、Claude Code の `CLAUDE.md` 等）も特別扱いしません。
-  いずれも全走査され、`*.md` / `*.txt` は拡張子だけで `instruction` とラベルされます —
-  特定のツールを優遇も除外もしません。
-
-### verdict（安全保証ではない）
-
-| verdict | 意味 |
-|---|---|
-| `no_signal` | どのパターンにも一致せず。安全の証明ではない — ルールが何も捕まえなかっただけ。 |
-| `review_needed` | warning レベルの一致あり。インストール前に読むこと。 |
-| `do_not_install` | blocked レベルの一致（instruction override、`curl\|bash` 等）。 |
-
-## 使い方
-
-```sh
-./skill-screen --target /path/to/some-skill            # 人間向けの判定
-./skill-screen --target /path/to/some-skill --json     # machine-readable な JSON
-./skill-screen --target ./suspect --quarantine         # ./quarantine/ へ隔離してから検査
-./skill-screen --target ./suspect --quarantine=/tmp/q  # ...任意のディレクトリへ
-```
-
-日本語の warning パターンは**既定で適用**されます（中心読者が日本語のため。オプトイン不要）。
-
-### オプション
-
-| オプション | 意味 |
-|---|---|
-| `--target <dir>` | 検査する skill/拡張のディレクトリ（必須） |
-| `--include-secret-scan` | 同梱された認証情報もスキャン（出力ではマスク） |
-| `--quarantine[=<dir>]` | 対象を**先に隔離してから**検査する（move aside → 隔離先を走査）。退避先の既定は `./quarantine/`、`--quarantine=<dir>` で指定可。フラグ無しの既定は非破壊（その場で走査・read-only）。clean でも自動昇格しない — インストールするなら自分で戻す。隔離先が既存なら上書きせず `exit 3`。隔離は封じ込めであって有罪の証明ではない。 |
-| `--json` | サマリでなく machine-readable な JSON を出力 |
-
-必要なもの: `bash`、`grep`、`sha256sum`、`timeout`（coreutils）。`jq` があれば JSON が整形
-される（なくても安全に degrade）。
-
-## 制限事項（必ず読むこと）
-
-`skill-screen` はスクリーンであって証明ではありません。設計上の既知の境界:
-
-- `no_signal` は「安全」ではない。走査した範囲でルールが一致しなかった、という意味。
-- バイナリは hash 化されるが pattern 走査されない。バイナリ blob に隠された payload は
-  テキストルールに一致しない（ただし `content_hash` には含まれる）。
-- 対象外へ逃げる symlink は、追従せず flag。`SKILL.md` が自ディレクトリ外を指す skill は、
-  読まずに `do_not_install` と報告（scan-bypass を塞ぎ、かつ対象外のファイルを読まない）。
-  ツリー内の通常ファイルへの symlink は通常通り走査。
-- Stage 1 は高 recall。攻撃を*説明しているだけ*の skill も flag する。意図と説明の
-  切り分けは Stage 2（LLM プロンプト）が行う。
-- パターン網羅は意図的に小さく、英語+日本語のみ。自分で読み切れるスクリーンは、読めない
-  巨大リストに勝る。
-
-## ライセンス
-
-[LICENSE](LICENSE) を参照。
-
----
-
-# English
-
-A local, transparent pre-install safety screen for third-party AI agent skills
-(Claude Code and OpenAI Codex, the shared `SKILL.md` format). It scans every file in
-the directory — not just the skill itself, but any instruction files an agent reads
-(`SKILL.md` / `AGENTS.md` / `CLAUDE.md`, etc.) and scripts too. **The whole tool is a
-single script, `skill-screen`**, readable top to bottom.
-
-> Status: tested core. The Stage 1 engine and the labeled corpus pass the full
-> dry-run suite (`test-scan.sh`); the license is MIT. Not yet published —
-> a companion write-up is in progress.
+A local, transparent, **read-only** pre-install safety screen for third-party AI agent
+skills (Claude Code and OpenAI Codex — the shared `SKILL.md` format). It scans every file
+in a skill directory — not just `SKILL.md`, but any instruction files an agent reads
+(`SKILL.md` / `AGENTS.md` / `CLAUDE.md`) and scripts too. The whole scanner is a single
+script, `skill-screen`, readable top to bottom. It **never creates, moves, or deletes
+your files** — it only reads and reports. No network, no account, no telemetry.
 
 ## Why
 
 Before you drop a skill you found on GitHub or a gist into `~/.claude/skills/`, you are
-trusting its `SKILL.md` and scripts with whatever your agent can do. Official
-marketplaces screen their own listings, but there is no built-in check for a
-skill you install yourself.
+trusting its `SKILL.md` and scripts with whatever your agent can do. Official marketplaces
+screen their own listings, but there is no built-in check for a skill you install
+yourself. `skill-screen` fills that gap with three deliberate properties:
 
-`skill-screen` fills that gap with two deliberate properties:
+- **Local-complete** — it never sends your skill anywhere. Everything runs on your machine.
+  No account, no upload, no telemetry.
+- **Read-only** — it never writes, moves, or deletes anything in your target. A freshly
+  downloaded, not-yet-trusted tool that silently created or moved folders would itself be
+  a red flag. Isolation is *your* manual step (see Usage), never the tool's.
+- **Transparent** — the entire detection logic lives in the single `skill-screen` file:
+  the **(1) DETECTION RULES** section (readable `grep` patterns) and the **(2) INSPECTION**
+  section that applies them to every file. No model, no black box in the mechanical stage.
+  To change a rule, edit section (1).
 
-- **Local-complete** — it never sends your skill anywhere. Everything runs on your
-  machine. No account, no upload, no telemetry.
-- **Transparent** — the entire detection logic lives in the single `skill-screen`
-  file: the **(1) DETECTION RULES** section (readable `grep` patterns) and the
-  **(2) INSPECTION** section (`_skc_grep`) that applies them to every file. No model,
-  no black box in the mechanical stage. To change a rule, edit section (1).
-
-Other skill/agent scanners exist — some are open source — but they typically need an
-account and send your skills' names or metadata to a cloud service to run their checks.
-`skill-screen` does not try to out-feature them. The point is trust: every rule lives
-in one file you can read, and nothing — no skill, no metadata — ever leaves your machine
-(no account required).
+The point is trust: every rule lives in one file you can read, and nothing — no skill, no
+metadata — ever leaves your machine.
 
 ## How it works — inspection and interpretation are separate
 
-1. **Stage 1 (mechanical, `grep`)** — `skill-screen` walks the skill directory and
-   matches a fixed, readable set of prompt-injection / risky-behavior patterns. It
-   emits a machine-readable JSON verdict. High recall by design (it flags candidates;
-   it does not decide intent).
-2. **Stage 2 (interpretation, optional)** — hand `stage2-interpret.md` plus the
-   Stage 1 JSON to an LLM (or read it yourself) to separate true positives from skills
-   that merely *document* attacks. The prompt treats the skill as data and is
-   instructed not to follow any instructions inside it.
+1. **Stage 1 (mechanical, `grep`)** — `skill-screen` walks the target directory and matches
+   a fixed, readable set of prompt-injection / risky-behavior patterns, then emits a
+   machine-readable JSON verdict. High recall by design (it flags candidates; it does not
+   decide intent).
+2. **Stage 2 (interpretation, optional)** — hand the Stage 1 JSON plus the flagged excerpts,
+   together with the Stage 2 prompt in `SKILL.md`, to a capable LLM (or read it yourself) to
+   separate true positives from skills that merely *document* attacks. The prompt treats the
+   skill as data and refuses to follow instructions inside it.
 
 ### What it inspects (scan scope)
 
-- Every file is scanned, not just `SKILL.md`. Stage 1 walks the whole target and
-  greps *every* non-denylisted file — including the skill's own scripts and executables
-  (`.sh`, `.py`, `.js`, …), which are where a `curl|bash` installer or a credential
-  exfil usually lives. Each hit is labelled with a `role` (`instruction` / `executable`
-  / `other`) so you can see whether a match came from prose or from code. Narrowing the
-  scan by file type is deliberately *not* done — that would let a payload hide in an
-  unexpected file. (Denylisted noise such as `.git/`, `node_modules/`, `.env` is skipped;
-  binaries are hashed but not pattern-scanned — see *Limitations*.)
-- The `role` (`instruction` / `executable` / `other`) is decided by extension alone.
-  No tool's own instruction filename (Codex's `AGENTS.md`, Claude Code's `CLAUDE.md`,
-  etc.) is special-cased. All of them are scanned, and `*.md` / `*.txt` files are
-  labelled `instruction` by extension alone — no single tool is privileged or omitted.
+Every non-denylisted file is scanned, not just `SKILL.md` — including the skill's own scripts
+(`.sh`, `.py`, `.js`, …), where a `curl|bash` installer or a credential exfil usually lives.
+Each hit gets a `role` (`instruction` / `executable` / `other`) by extension alone; no tool's
+instruction filename (`AGENTS.md`, `CLAUDE.md`, …) is special-cased. Denylisted noise
+(`.git/`, `node_modules/`, `.env`) is skipped; binaries are hashed but not pattern-scanned
+(see Limitations).
 
 ### Verdicts (not safety guarantees)
 
@@ -175,14 +58,28 @@ in one file you can read, and nothing — no skill, no metadata — ever leaves 
 | `review_needed` | warning-level matches; read them before installing. |
 | `do_not_install` | blocked-level matches (instruction override, `curl\|bash`, etc.). |
 
+## Install (as an agent skill)
+
+`skill-screen` is itself a skill folder. To let your agent run it automatically:
+
+- Drop this whole folder into `~/.claude/skills/` (so you get
+  `~/.claude/skills/skill-screen/SKILL.md` next to `.../skill-screen`).
+- Already have your own `SKILL.md` setup? Append this `SKILL.md`'s body to yours and keep
+  the `skill-screen` script beside it.
+
+Or just run the script directly — it needs no installation (see Usage).
+
 ## Usage
 
 ```sh
-./skill-screen --target /path/to/some-skill            # human-readable verdict
-./skill-screen --target /path/to/some-skill --json     # machine-readable JSON
-./skill-screen --target ./suspect --quarantine         # isolate into ./quarantine/, then scan
-./skill-screen --target ./suspect --quarantine=/tmp/q  # ...into a directory you choose
+./skill-screen --target /path/to/some-skill                       # human-readable verdict
+./skill-screen --target /path/to/some-skill --json                # machine-readable JSON
+./skill-screen --target /path/to/some-skill --include-secret-scan # also flag shipped credentials
 ```
+
+**Isolation-first (manual):** keep an untrusted skill where you downloaded it (e.g.
+`~/Downloads/`); do not move it into `~/.claude/skills/` until it clears. The tool never
+moves it for you — scanning is read-only.
 
 The Japanese warning patterns are applied **by default** (the primary audience is
 Japanese); there is no opt-in flag.
@@ -193,7 +90,6 @@ Japanese); there is no opt-in flag.
 |---|---|
 | `--target <dir>` | directory of the skill/extension to screen (required) |
 | `--include-secret-scan` | also scan for shipped credentials (masked in output) |
-| `--quarantine[=<dir>]` | isolate the target **first**, then scan the isolated copy (move aside → scan). Default destination is `./quarantine/`; pass `--quarantine=<dir>` to choose another. Without the flag the default is non-destructive (scan in place, read-only). A clean verdict does not auto-promote it — move it back yourself if you install it. If the destination already exists it is not overwritten (`exit 3`). Quarantine is containment, not proof of malice. |
 | `--json` | print the machine-readable JSON instead of a summary |
 
 Requirements: `bash`, `grep`, `sha256sum`, `timeout` (coreutils). `jq` is used for clean
@@ -204,17 +100,15 @@ JSON output; without it the tool degrades safely.
 `skill-screen` is a screen, not a proof. Known boundaries by design:
 
 - `no_signal` is not "safe." It means no rule matched what was scanned.
-- Binary files are hashed but not pattern-scanned. A payload hidden in a binary
-  blob won't be matched by the text rules (it is still part of `content_hash`).
-- Symlinks that escape the target are flagged, not followed. A skill whose
-  `SKILL.md` points outside its own directory is reported as `do_not_install` rather
-  than read (this both closes a scan-bypass and avoids reading files outside the
-  target). In-tree symlinks to regular files are scanned normally.
-- Stage 1 is high-recall. It flags skills that merely *document* attacks too;
-  Stage 2 (the LLM prompt) is what separates intent from documentation.
-- Pattern coverage is intentionally small and English/Japanese only. A screen you
-  can fully read beats a sprawling list you can't audit.
+- Binary files are hashed but not pattern-scanned. A payload hidden in a binary blob won't
+  be matched by the text rules (it is still part of `content_hash`).
+- Symlinks that escape the target are flagged, not followed: a skill whose `SKILL.md` points
+  outside its own directory is reported as `do_not_install` rather than read.
+- Stage 1 is high-recall. It flags skills that merely *document* attacks too; Stage 2 (the
+  LLM prompt) separates intent from documentation.
+- Pattern coverage is intentionally small and English/Japanese only. A screen you can fully
+  read beats a sprawling list you can't audit.
 
 ## License
 
-See [LICENSE](LICENSE).
+See [LICENSE](LICENSE) (MIT). Third-party notes: [LICENSES.md](LICENSES.md).

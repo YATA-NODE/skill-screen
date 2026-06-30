@@ -1,6 +1,7 @@
-# local quarantine output (never commit quarantined skills)
-quarantine/
-*.quarantine/
+# local test environment — fixtures (incl. a fake credential) + the test harness.
+# Kept local, never shipped: a downloaded security tool should not carry attack
+# fixtures or a fake key. Run the suite locally with: bash test/test-scan.sh
+test/
 
 # scan output dumps
 *.scan.json
