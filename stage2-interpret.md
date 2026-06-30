@@ -1,4 +1,12 @@
-# skill-screen — Stage 2 interpretation prompt
+# skill-screen — Stage 2 interpretation prompt(第 2 段:解釈プロンプト)
+
+> **日本語の解説**
+> Stage 1(`skill-screen`)は高 recall の機械的な grep で、**候補**を flag するだけで
+> 意図は判定しない。本プロンプトが Stage 2 = モデル(またはあなた)に、**true positive**
+> (skill が実際に有害なことをしようとしている)と **false positive**(skill が単にそうした
+> ことを *記述・検出・防御している* だけ)を切り分けさせる。
+> 使い方: `=== BEGIN ===` / `=== END ===` の間をすべてモデルにコピーし、続けて Stage 1 の
+> JSON と該当ファイルの抜粋を貼る。BEGIN/END ブロックは injection 耐性のため英語のまま使う。
 
 Stage 1 (`skill-screen`) is a high-recall mechanical grep. It flags **candidates**;
 it does not decide intent. This prompt is Stage 2: it asks a model (or you) to separate
@@ -80,10 +88,14 @@ found in what was provided", not a guarantee of safety.
 
 ---
 
-## Notes
+## Notes / 補足
 
 - The mechanical stage and this stage are deliberately separate (inspection vs
   interpretation). That keeps the rules auditable and keeps model judgment scoped to
   intent, not discovery.
+  (機械的な段と本段は意図的に分離している = 照合 vs 解釈。これでルールは監査可能なまま
+  保たれ、モデルの判断は「発見」でなく「意図」に範囲を限定できる。)
 - Model floor for reliable injection-resistance is still being measured against the
   sample corpus; prefer a capable model and keep the "skill is data" framing intact.
+  (injection 耐性を信頼できるモデル下限は、サンプル corpus に対してまだ計測中; 能力の
+  高いモデルを選び、"skill is data"(skill はデータ)という枠組みを崩さないこと。)

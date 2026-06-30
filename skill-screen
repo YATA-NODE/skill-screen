@@ -1,86 +1,93 @@
 #!/usr/bin/env bash
-# skill-screen — a local, transparent, single-file pre-install screen for agent skills.
+# skill-screen — エージェント skill 向けの、ローカル・透明・単一ファイルの導入前スクリーナ。
 #
-# Everything is in this one file, in plain sight, in four sections:
-#   (1) DETECTION RULES   the readable grep ruleset — edit here to customise
-#   (2) INSPECTION        the one grep that checks every file against the rules
-#   (3) SCAN ENGINE       walk, hash, mask, and the fail-closed verdict (frozen core)
-#   (4) DRIVER            argument parsing, quarantine, and output
+# すべてがこの 1 ファイルに、隠さず、4 つのセクションで収まっている:
+#   (1) DETECTION RULES   読める grep ルールセット — カスタマイズはここを編集する
+#   (2) INSPECTION        全ファイルをルールに照合する唯一の grep
+#   (3) SCAN ENGINE       走査・ハッシュ・マスク・fail-closed な verdict(凍結コア)
+#   (4) DRIVER            引数解析・quarantine・出力
 #
-# It walks a skill/extension directory, runs the ruleset, and prints a verdict.
-# This is the MECHANICAL stage only: it surfaces candidates. For intent, hand the
-# JSON plus stage2-interpret.md to an LLM (or read it yourself).
+# skill/拡張のディレクトリを走査し、ルールセットを適用して verdict を出力する。
+# ここは MECHANICAL(機械的)段のみ = 候補を炙り出すだけ。意図の判定は、JSON と
+# stage2-interpret.md を LLM に渡す(あるいは自分で読む)。
 #
-# A verdict is NOT a safety guarantee. "no_signal" means "no rule matched", not
-# "safe". Read what it flags and use judgment.
+# verdict は安全の保証ではない。"no_signal" は「どのルールにも一致しなかった」で
+# あって「安全」ではない。何が flag されたかを読み、判断すること。
 #
-# Dependencies: bash, grep, sha256sum, timeout (coreutils). jq is optional (clean
-# JSON; degrades to a minimal JSON if absent). No network, no remote service.
+# 依存: bash, grep, sha256sum, timeout(coreutils)。jq は任意(あればきれいな
+# JSON、無ければ最小 JSON へ degrade)。ネットワーク・リモートサービスは一切なし。
 set -u
 
-# Resolve this script's own directory (used only to locate stage2-interpret.md).
+# このスクリプト自身のディレクトリを解決する(stage2-interpret.md の位置特定にのみ使う)。
 _self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   cat <<'EOF'
+skill-screen — エージェント skill 向けの、ローカル・透明な導入前スクリーナ。
 skill-screen — local, transparent pre-install screen for agent skills.
 
-Usage:
+使い方 / Usage:
   skill-screen --target <dir> [options]
 
-Options:
-  --target <dir>        Directory of the skill/extension to screen (required).
-  --include-secret-scan Also scan for shipped credentials (masked in output).
-  --quarantine[=<dir>]  Isolate the target (move it aside) BEFORE scanning, then scan
+オプション / Options:
+  --target <dir>        検査する skill/拡張のディレクトリ(必須)。
+                        Directory of the skill/extension to screen (required).
+  --include-secret-scan 同梱された認証情報も走査する(出力ではマスク)。
+                        Also scan for shipped credentials (masked in output).
+  --quarantine[=<dir>]  走査の前に対象を隔離(脇へ退避)し、隔離コピーを走査する
+                        (退避先の既定は ./quarantine/)。フラグなしの既定は
+                        非破壊 = その場で読み取り専用に走査する。
+                        Isolate the target (move it aside) BEFORE scanning, then scan
                         the isolated copy (default dir: ./quarantine/). Default without
                         this flag is non-destructive: scan in place, read-only.
-  --json                Print the machine-readable JSON instead of a summary.
-  -h, --help            Show this help.
+  --json                要約の代わりに機械可読の JSON を出力する。
+                        Print the machine-readable JSON instead of a summary.
+  -h, --help            このヘルプを表示する。 / Show this help.
 
-Exit codes:  0 no_signal   1 review_needed   2 do_not_install   3 scan-error
+終了コード / Exit codes:  0 no_signal   1 review_needed   2 do_not_install   3 scan-error
 EOF
 }
 
 # ============================================================================
-# (1) DETECTION RULES — edit here to customise what gets flagged
+# (1) DETECTION RULES(検出ルール)— flag 対象のカスタマイズはここを編集する
 # ============================================================================
 
-# The entire detection ruleset, in plain sight.
+# 検出ルールセットの全体を、隠さずここに置く。
 #
-# This is the transparency promise of skill-screen: every rule that can flag a
-# skill lives here, as a readable POSIX extended-regex (ERE). There is no hidden
-# model and no remote service in the mechanical stage. Read it, audit it, fork it.
-# To customise what gets flagged, edit the arrays below — nothing else needs to change.
+# これが skill-screen の透明性の約束: skill を flag しうるルールは、すべて読める
+# POSIX 拡張正規表現(ERE)としてここに在る。MECHANICAL 段に隠れたモデルもリモート
+# サービスも無い。読んで、監査して、fork してよい。flag 対象を変えたいなら下の配列
+# を編集する — それ以外は何も変えなくてよい。
 #
-# Format of each entry:  category|severity|extended-regex
-#   - category : short stable id, shown in output and used by the stage-2 prompt
-#   - severity : "blocked" (do not install) or "warning" (read before installing)
-#   - regex    : matched with `grep -nE` against each scanned file
+# 各エントリの形式:  category|severity|extended-regex
+#   - category : 短く安定した id。出力に表示され stage-2 プロンプトでも使う
+#   - severity : "blocked"(導入不可)または "warning"(導入前に読む)
+#   - regex    : 各走査ファイルに `grep -nE` で照合する
 #
-# Design notes (why the ruleset is small and conservative):
-#   - High recall, deliberate false positives. Stage 1 flags *candidates*; a human
-#     or an LLM (stage 2) decides intent. A skill that merely *documents* an attack
-#     ("never write 'ignore previous instructions'") will match here — that is fine,
-#     stage 2 sorts it out.
-#   - Non-English (Japanese) patterns are warning-only. Vocabulary-based matching is
-#     easy to evade by rewording, so a JP hit alone never escalates to "blocked".
-#   - The list is intentionally NOT exhaustive across languages or phrasings. A
-#     screen you can fully read beats a sprawling list you can't.
+# 設計メモ(なぜルールセットを小さく保守的にするか):
+#   - 高 recall + 意図的な false positive。stage 1 は *候補* を flag するだけで、意図
+#     は人間か LLM(stage 2)が判定する。攻撃を *記述しているだけ* の skill
+#     (「'ignore previous instructions' とは書くな」)もここで一致する — それでよい、
+#     stage 2 が仕分ける。
+#   - 非英語(日本語)パターンは warning のみ。語彙ベースの照合は言い換えで容易に
+#     回避できるため、JP の一致単独で "blocked" に昇格させない。
+#   - このリストは言語や言い回しを網羅 *しない* ことを意図している。全部読める
+#     スクリーンは、読めない巨大なリストに勝る。
 
-# Bump when the pattern set or the output shape changes (recorded in scan output;
-# used for re-check logic).
-#   v1 (initial): EN blocked 3 + EN warning 5 + JP warning 4 (JP opt-in)
-#   v2: JP warnings applied by default; "profile" field removed from JSON output
+# パターン集合または出力形状が変わったら bump する(走査出力に記録され、再チェック
+# 判定に使う)。
+#   v1 (initial): EN blocked 3 + EN warning 5 + JP warning 4(JP は opt-in)
+#   v2: JP warning を既定適用; JSON 出力から "profile" フィールドを削除
 patterns::schema_version() { echo "2"; }
 
-# BLOCKED — install-blocking. Classic prompt-injection / remote code execution.
+# BLOCKED — 導入をブロックする。典型的な prompt-injection / リモートコード実行。
 SKC_BLOCKED_PATTERNS=(
   'instruction-override|blocked|(ignore|disregard) (all |any )?(previous|prior|above|earlier) (instruction|prompt|direction|rule)|forget (everything|all|your) (prior|previous|instruction|rule)|override (the )?(system|previous|prior) (prompt|instruction)'
   'role-change|blocked|you are now (an?|the)|act as (an?|the|if)|pretend (to be|you are)|from now on,? you (are|will|must|should)|disregard your (role|persona|identity|instruction)'
   'remote-exec|blocked|(curl|wget)[^|]*\|[[:space:]]*(sudo[[:space:]]+)?(sh|bash|zsh)([[:space:]]|$)'
 )
 
-# WARNING (English) — legitimate uses exist; surface for a human read.
+# WARNING (English) — 正当な用途も在りうる; 人間が読むために炙り出す。
 SKC_WARNING_PATTERNS=(
   'directive-injection|warning|^[[:space:]]*(system|assistant|developer)[[:space:]]*:'
   'secret-file-ref|warning|~/\.ssh/|~/\.aws/|/etc/(shadow|passwd)|(^|[^A-Za-z._])id_rsa([^A-Za-z]|$)|\.pem([^A-Za-z]|$)|\.p12([^A-Za-z]|$)|(^|[^A-Za-z.])\.env([^A-Za-z]|$)'
@@ -89,11 +96,11 @@ SKC_WARNING_PATTERNS=(
   'rule-reversal|warning|(always|must)[[:space:]].{0,40}(never|must[[:space:]]not)|(security[_-]?review|fact[_-]?check|brand[_-]?check)[[:space:]].{0,24}(optional|skip|disable|unnecessary|not[[:space:]]+required)'
 )
 
-# WARNING (Japanese) — applied by default (the primary audience is Japanese).
-# Severity fixed to warning (see design note: vocabulary matching is easy to reword,
-# so a JP hit alone never escalates to "blocked"). Limited to the core 4: instruction
-# override / role change / system-prompt reference / explicit role nullification.
-# No open-ended multi-language expansion.
+# WARNING (Japanese) — 既定で適用する(主読者は日本語)。
+# severity は warning に固定(設計メモ参照: 語彙照合は言い換えで容易に回避できるため、
+# JP の一致単独で "blocked" には昇格させない)。中核 4 つに限定する: 指示の上書き /
+# 役割変更 / システムプロンプト参照 / 明示的な役割の無効化。
+# 言語を際限なく増やす拡張はしない。
 SKC_JP_WARNING_PATTERNS=(
   'instruction-override-jp|warning|(これまでの|以前の|上記の|前述の)[[:space:]]*(指示|命令|指令|指図|プロンプト|ルール).{0,8}(を)?[[:space:]]*(無視|忘れ|破棄|忘却|抹消|撤回)'
   'role-change-jp|warning|(以後|今後|これから)[[:space:]]*(あなたは|君は)'
@@ -101,11 +108,11 @@ SKC_JP_WARNING_PATTERNS=(
   'role-change-explicit-jp|warning|(役割|ロール|ペルソナ)[[:space:]]*(を)?[[:space:]]*(変更|変え|無効|無視)'
 )
 
-# SECRET markers — opt-in with --include-secret-scan. A skill that ships a real
-# credential is a strong "do not install" signal (and a leak risk for the author).
-# Matched values are masked before they ever appear in output (see scan.sh).
-# Lines containing a placeholder word (EXAMPLE/DUMMY/TEST/SAMPLE/PLACEHOLDER/YOUR_/
-# xxxxx) are skipped by scan.sh to cut documentation false positives.
+# SECRET markers — --include-secret-scan で opt-in。本物の認証情報を同梱した skill は
+# 強い "do not install" シグナル(かつ作者にとっての漏洩リスク)。一致した値は出力に
+# 現れる前にマスクされる(scan エンジン参照)。プレースホルダ語(EXAMPLE/DUMMY/TEST/
+# SAMPLE/PLACEHOLDER/YOUR_/xxxxx)を含む行は、ドキュメント由来の false positive を
+# 減らすためスキップされる。
 SKC_SECRET_PATTERNS=(
   'aws-access-key|blocked|AKIA[0-9A-Z]{16}'
   'github-token|blocked|ghp_[A-Za-z0-9]{36}'
@@ -115,16 +122,15 @@ SKC_SECRET_PATTERNS=(
   'slack-token|blocked|xox[baprs]-[A-Za-z0-9-]{10,}'
 )
 
-# patterns::secret_patterns — emit secret marker patterns, one per line.
+# patterns::secret_patterns — secret マーカーのパターンを 1 行ずつ出力する。
 patterns::secret_patterns() {
   local p
   for p in "${SKC_SECRET_PATTERNS[@]}"; do printf '%s\n' "$p"; done
 }
 
 # patterns::all_patterns
-# Emit every active pattern, one "category|severity|regex" per line.
-# The Japanese warning patterns are applied by default (the primary audience is
-# Japanese): there is no opt-in flag.
+# 有効な全パターンを "category|severity|regex" の形で 1 行ずつ出力する。
+# 日本語 warning パターンは既定で適用される(主読者は日本語): opt-in フラグは無い。
 patterns::all_patterns() {
   local p
   for p in "${SKC_BLOCKED_PATTERNS[@]}"; do printf '%s\n' "$p"; done
@@ -132,22 +138,22 @@ patterns::all_patterns() {
   for p in "${SKC_JP_WARNING_PATTERNS[@]}"; do printf '%s\n' "$p"; done
 }
 
-# patterns::category_count — number of active patterns (for scan output).
+# patterns::category_count — 有効なパターン数(走査出力用)。
 patterns::category_count() {
   patterns::all_patterns | grep -c . || true
 }
 
 # ============================================================================
-# (2) INSPECTION — the single grep that checks every file against the rules above
+# (2) INSPECTION(照合)— 上のルールに全ファイルを照合する唯一の grep
 # ============================================================================
 
-# _skc_grep <regex> <file> -> capture matched "line:content" rows into the global
-# _SKC_MATCHES (newline-separated; empty if none) and flag a timeout. Shared by the
-# pattern and secret scan loops so the grep+timeout+rc124 skeleton lives in one place.
-# MUST be called WITHOUT command substitution: `_skc_grep ...` runs in the current
-# shell, so SKC_INCOMPLETE=1 (the fail-closed timeout flag) survives in the caller.
-# A `$(_skc_grep ...)` form would run it in a subshell and silently discard that
-# assignment, defeating fail-closed. The grep's own $() is internal and side-effect free.
+# _skc_grep <regex> <file> -> 一致した "line:content" 行をグローバル _SKC_MATCHES
+# (改行区切り、無ければ空)に取り込み、timeout を立てる。パターン走査と secret 走査の
+# 両ループで共有し、grep+timeout+rc124 の骨格を 1 箇所に集約する。
+# command substitution を介さずに呼ぶこと: `_skc_grep ...` は現在のシェルで走るので
+# SKC_INCOMPLETE=1(fail-closed の timeout フラグ)が呼び出し側に残る。
+# `$(_skc_grep ...)` 形式だとサブシェルで走り、この代入が黙って捨てられ fail-closed が
+# 壊れる。grep 内部の $() は内部用で副作用は無い。
 _skc_grep() {
   local rc
   _SKC_MATCHES="$(timeout "$SKC_GREP_TIMEOUT" grep -nIE -- "$1" "$2" 2>/dev/null)"; rc=$?
@@ -155,14 +161,14 @@ _skc_grep() {
 }
 
 # ============================================================================
-# (3) SCAN ENGINE — walk, hash, mask, fail-closed verdict (frozen core)
+# (3) SCAN ENGINE(走査エンジン)— 走査・ハッシュ・マスク・fail-closed verdict(凍結コア)
 # ============================================================================
 
-SKC_MATCH_CAP="${SKC_MATCH_CAP:-20}"        # max matches recorded per file+pattern
-SKC_GREP_TIMEOUT="${SKC_GREP_TIMEOUT:-15}"  # seconds per grep invocation
-SKC_EXCERPT_MAX="${SKC_EXCERPT_MAX:-200}"   # max chars of a matched line kept
+SKC_MATCH_CAP="${SKC_MATCH_CAP:-20}"        # file+pattern ごとに記録する最大一致数
+SKC_GREP_TIMEOUT="${SKC_GREP_TIMEOUT:-15}"  # grep 1 回あたりの秒数
+SKC_EXCERPT_MAX="${SKC_EXCERPT_MAX:-200}"   # 一致行から保持する最大文字数
 
-# Directories/files never scanned or hashed (noise + secrets, defense in depth).
+# 走査もハッシュもしないディレクトリ/ファイル(ノイズ + secret、多層防御)。
 _skc_is_denied() {
   case "$1" in
     .git/*|*/.git/*|.git) return 0 ;;
@@ -174,19 +180,18 @@ _skc_is_denied() {
   return 1
 }
 
-# scan::list_files <dir> -> relative paths (one per line), denylist applied.
-# Runs in a subshell when used in $(...) / <(...), so it cannot set a parent global.
-# Instead, if SKC_BADNAME_FLAG points to a file, it appends a byte there whenever a
-# path with a control char (or embedded newline) is seen — an evasion red flag the
-# caller checks after the scan.
+# scan::list_files <dir> -> 相対パスを 1 行ずつ出力する(denylist 適用済み)。
+# $(...) / <(...) で使うとサブシェルで走るため、親のグローバルを設定できない。
+# 代わりに、SKC_BADNAME_FLAG がファイルを指していれば、制御文字(や埋め込み改行)を
+# 含むパスを見るたびそこへ 1 バイト追記する — 走査後に呼び出し側が確認する回避の
+# 危険信号(red flag)。
 scan::list_files() {
   local dir="$1" rel real base
-  # Include symlinks (-type l): a skill whose SKILL.md is a symlink pointing OUTSIDE
-  # the target would otherwise look in-tree yet never be scanned (find -type f skips
-  # links) = an evaluation bypass. We resolve each
-  # symlink: if it stays inside the target and is a regular file, scan it; if it
-  # escapes the target (or can't be resolved), flag it (red flag) and never read it
-  # (no path traversal out of the target).
+  # symlink も含める(-type l): SKILL.md が target の「外」を指す symlink である skill は、
+  # in-tree に見えて一度も走査されない(find -type f は link を飛ばす)= 評価のバイパス。
+  # 各 symlink を解決する: target 内に留まり通常ファイルなら走査する; target の外へ
+  # 出る(または解決できない)なら flag を立て(red flag)、決して読まない
+  # (target の外への path traversal をしない)。
   while IFS= read -r -d '' rel; do
     rel="${rel#./}"
     [ -z "$rel" ] && continue
@@ -203,9 +208,9 @@ scan::list_files() {
         base="$(realpath -m -- "$dir" 2>/dev/null)"
       fi
       if [ -n "$real" ] && { [ "$real" = "$base" ] || case "$real" in "$base"/*) true ;; *) false ;; esac; }; then
-        [ -f "$dir/$rel" ] && printf '%s\n' "$rel"   # in-tree regular file: scan it
+        [ -f "$dir/$rel" ] && printf '%s\n' "$rel"   # in-tree の通常ファイル: 走査する
       else
-        [ -n "${SKC_BADNAME_FLAG:-}" ] && printf 1 >> "$SKC_BADNAME_FLAG"  # escapes target
+        [ -n "${SKC_BADNAME_FLAG:-}" ] && printf 1 >> "$SKC_BADNAME_FLAG"  # target の外へ脱出
       fi
       continue
     fi
@@ -213,11 +218,11 @@ scan::list_files() {
   done < <(cd "$dir" 2>/dev/null && find . \( -type f -o -type l \) -print0 2>/dev/null)
 }
 
-# _skc_content_hash_from_list <dir> <list_file> -> "sha256:<hex>" over
-# (relpath + US + sha256(content)), LC_ALL=C-sorted for determinism. <list_file> is a
-# precomputed scan::list_files output (one relpath per line). sha256sum is wrapped in
-# timeout so a pathological file cannot hang the fingerprint; a partial hash is NOT
-# wired to SKC_INCOMPLETE (content_hash is an identity, not a detection signal).
+# _skc_content_hash_from_list <dir> <list_file> -> (relpath + US + sha256(content)) に
+# 対する "sha256:<hex>"。決定性のため LC_ALL=C でソートする。<list_file> は事前計算済み
+# の scan::list_files 出力(1 行 1 relpath)。sha256sum は timeout で包み、病的なファイル
+# が指紋計算を hang させないようにする; 部分ハッシュは SKC_INCOMPLETE に連動させない
+# (content_hash は識別子であって検出シグナルではない)。
 _skc_content_hash_from_list() {
   local dir="$1" list="$2" rel sum
   command -v sha256sum >/dev/null 2>&1 || { echo "sha256:unavailable"; return 0; }
@@ -227,10 +232,10 @@ _skc_content_hash_from_list() {
   echo "sha256:$sum"
 }
 
-# _skc_redact <string> -> mask any secret-pattern match (upholds the masking
-# invariant for the hits excerpt channel, not just secret_hits). A secret can ride
-# on a line that matches a warning pattern (e.g. an Authorization header on a
-# net-call line); without this, the raw token would land verbatim in hits[].excerpt.
+# _skc_redact <string> -> secret パターンの一致をマスクする(secret_hits だけでなく
+# hits の excerpt チャネルでもマスク不変条件を保つ)。secret は warning パターンに一致
+# する行に同居しうる(例: net-call 行の Authorization ヘッダ); これが無いと生のトークン
+# が hits[].excerpt にそのまま載ってしまう。
 _skc_redact() {
   local s="$1" entry regex
   if declare -F patterns::secret_patterns >/dev/null 2>&1; then
@@ -243,10 +248,9 @@ _skc_redact() {
   printf '%s' "$s"
 }
 
-# _skc_sanitize <string> -> printable, delimiter-free, secret-masked, truncated.
-# Truncation uses bash substring (character-based under a UTF-8 locale) to avoid
-# cutting a multibyte character in half, which could yield invalid UTF-8 and break
-# the downstream `jq -R`.
+# _skc_sanitize <string> -> 印字可能・区切り文字なし・secret マスク済み・切り詰め済み。
+# 切り詰めは bash の部分文字列(UTF-8 ロケール下では文字単位)を使い、マルチバイト文字
+# を途中で割らないようにする。割ると不正な UTF-8 になり、後段の `jq -R` が壊れうる。
 _skc_sanitize() {
   local s
   s="$(printf '%s' "$1" | tr -d '\000-\037')"
@@ -254,22 +258,22 @@ _skc_sanitize() {
   printf '%s' "${s:0:$SKC_EXCERPT_MAX}"
 }
 
-# _skc_has_placeholder <line> -> 0 if the line looks like docs/example (skip secret hit)
+# _skc_has_placeholder <line> -> 行が docs/例示 に見えれば 0(secret hit をスキップ)
 _skc_has_placeholder() {
   printf '%s' "$1" | grep -qiE 'EXAMPLE|DUMMY|TEST|SAMPLE|PLACEHOLDER|YOUR_|<your-|xxxxx'
 }
 
-# _skc_mask <token> -> first 4 chars + "***" (raw secret never leaves the function)
+# _skc_mask <token> -> 先頭 4 文字 + "***"(生の secret は関数の外に出さない)
 _skc_mask() {
   printf '%s***' "$(printf '%s' "$1" | cut -c1-4)"
 }
 
-# _skc_role <relpath> -> prints: instruction | executable | other
-# Classification is by path/extension only; advisory context for the output.
-# Instruction-like files (any *.md / *.txt) are labelled "instruction" — this covers
-# SKILL.md, AGENTS.md, CLAUDE.md and any other prose an agent might read, symmetrically.
-# No tool's instruction filename is special-cased: every file is scanned regardless
-# ("scan superset"), and roles are derived from the extension alone.
+# _skc_role <relpath> -> instruction | executable | other を出力する。
+# 分類はパス/拡張子のみによる; 出力に添える補助的な文脈。
+# 指示文ファイル(任意の *.md / *.txt)は "instruction" とラベルする — SKILL.md・
+# AGENTS.md・CLAUDE.md など、エージェントが読みうる散文を対称に扱う。
+# どのツールの指示文ファイル名も特別扱いしない: すべてのファイルは一律に走査され
+# ("scan superset")、role は拡張子だけから導く。
 _skc_role() {
   case "$1" in
     *.sh|*.bash|*.zsh|*.fish|*.js|*.mjs|*.cjs|*.ts|*.py|*.rb|*.pl|*.php)
@@ -282,8 +286,8 @@ _skc_role() {
 
 
 # _skc_emit_json <dir> <content_hash> <files> <patterns> <signal>
-#                <hits_tmp> <secret_tmp>  -> JSON on stdout.
-# Uses jq when present; otherwise emits a minimal, still-valid degraded object.
+#                <hits_tmp> <secret_tmp>  -> JSON を stdout に出力する。
+# jq があれば使う; 無ければ最小限の(それでも妥当な)degraded オブジェクトを出力する。
 _skc_emit_json() {
   local dir="$1" chash="$2" files="$3" pcount="$4" signal="$5"
   local hits_tmp="$6" secret_tmp="$7"
@@ -307,14 +311,14 @@ _skc_emit_json() {
         content_hash:$ch, files_scanned:$fs, pattern_count:$pc,
         candidate_signal:$sig, hits:$hits, secret_hits:$secrets, scanned_at:$ts}'
   else
-    # Degraded path: no jq. Counts only, no per-hit detail (still valid JSON).
-    # grep -c prints "0" and exits 1 on no match; `|| true` keeps that "0" without
-    # appending a second one (the earlier `|| echo 0` produced a stray "0\n0").
+    # degraded 経路: jq なし。件数のみで一致ごとの詳細は出さない(それでも妥当な JSON)。
+    # grep -c は無一致時に "0" を出力して exit 1 する; `|| true` はその "0" を保ち、もう
+    # 一つ足さない(以前の `|| echo 0` は余分な "0\n0" を生んでいた)。
     local nhits nsec dir_esc
     nhits="$(grep -c . "$hits_tmp" 2>/dev/null || true)"; nhits="${nhits:-0}"
     nsec="$(grep -c . "$secret_tmp" 2>/dev/null || true)"; nsec="${nsec:-0}"
-    # target_dir is operator-controlled; escape \ and " and drop control chars so a
-    # crafted directory name cannot break the JSON in this hand-built path.
+    # target_dir は操作者が制御する; \ と " をエスケープし制御文字を落とすことで、
+    # 細工したディレクトリ名がこの手組み経路の JSON を壊せないようにする。
     dir_esc="$(printf '%s' "$dir" | tr -d '\000-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
     printf '{"schema_version":"%s","tool":"skill-screen","target_dir":"%s",' \
       "$(patterns::schema_version)" "$dir_esc"
@@ -327,7 +331,7 @@ _skc_emit_json() {
 }
 
 # scan::run <dir> <secret:0|1> <json_out_path>
-# Writes the result JSON to <json_out_path> and sets global SKC_SIGNAL to one of:
+# 結果 JSON を <json_out_path> に書き、グローバル SKC_SIGNAL を次のいずれかに設定する:
 #   no_signal | review_needed | do_not_install | scan-error
 scan::run() {
   local dir="$1" secret="$2" out="$3"
@@ -342,14 +346,13 @@ scan::run() {
   local hits_tmp secret_tmp files_tmp
   hits_tmp="$(mktemp)"; secret_tmp="$(mktemp)"; files_tmp="$(mktemp)"
   SKC_BADNAME_FLAG="$(mktemp)"
-  # Clean every temp on any return path. Set AFTER the mktemps so the missing-dir
-  # early return above (which runs before any temp exists) never fires it. RETURN
-  # traps set inside a function are function-scoped (no functrace) = no leak to
-  # callers (verified).
+  # どの return 経路でも全 temp を掃除する。mktemp 群の「後」に設定するので、上の
+  # dir 不在の早期 return(temp がまだ存在しない時点で走る)では発火しない。関数内で
+  # 設定した RETURN trap は関数スコープ(functrace なし)= 呼び出し側に漏れない(verified)。
   trap 'rm -f "$hits_tmp" "$secret_tmp" "$files_tmp" "$SKC_BADNAME_FLAG"' RETURN
 
-  # Walk the directory exactly once; reuse the cached list for the file count, the
-  # content hash, and the scan loop (previously three separate walks).
+  # ディレクトリの走査は厳密に 1 回だけ; キャッシュしたリストをファイル数・content
+  # hash・走査ループで再利用する(以前は別々に 3 回走査していた)。
   scan::list_files "$dir" > "$files_tmp"
   local files_scanned content_hash pattern_count
   files_scanned="$(grep -c . "$files_tmp" || true)"
@@ -392,10 +395,10 @@ scan::run() {
     fi
   done < "$files_tmp"
 
-  # signal: fail-closed on incomplete scan or control-char/escaping filenames.
-  # severity is field 2 (US-delimited); awk -F'\037' interprets the octal escape,
-  # whereas grep would not treat \037 as the US byte. If awk is unavailable we
-  # fail closed: any hit at all is treated as blocked rather than silently downgraded.
+  # signal: 不完全な走査、または制御文字/脱出するファイル名があれば fail-closed。
+  # severity はフィールド 2(US 区切り); awk -F'\037' は 8 進エスケープを解釈するが、
+  # grep は \037 を US バイトとして扱わない。awk が使えなければ fail-closed にする:
+  # いかなる hit も、黙って格下げせず blocked として扱う。
   local has_blocked=0
   if command -v awk >/dev/null 2>&1; then
     awk -F'\037' '$2=="blocked"{found=1} END{exit(found?0:1)}' "$hits_tmp" 2>/dev/null && has_blocked=1
@@ -413,17 +416,17 @@ scan::run() {
 
   _skc_emit_json "$dir" "$content_hash" "$files_scanned" \
     "$pattern_count" "$signal" "$hits_tmp" "$secret_tmp" > "$out"
-  # temps removed by the RETURN trap set at the top of this function.
+  # temp はこの関数冒頭で設定した RETURN trap が削除する。
 }
 
 # ============================================================================
-# (4) DRIVER — argument parsing, quarantine, output
+# (4) DRIVER(駆動部)— 引数解析・quarantine・出力
 # ============================================================================
 
 target="" ; secret=0 ; want_json=0
 quarantine=0 ; quarantine_dir=""
 
-need_val() { [ "$1" -ge 2 ] || { printf 'skill-screen: %s requires a value\n' "$2" >&2; exit 3; }; }
+need_val() { [ "$1" -ge 2 ] || { printf 'skill-screen: %s requires a value / %s には値が必要\n' "$2" "$2" >&2; exit 3; }; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --target) need_val "$#" --target; target="$2"; shift 2 ;;
@@ -433,40 +436,45 @@ while [ $# -gt 0 ]; do
     --quarantine=*) quarantine=1; quarantine_dir="${1#*=}"; shift ;;
     --json) want_json=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    *) printf 'skill-screen: unknown argument: %s\n' "$1" >&2; usage >&2; exit 3 ;;
+    *) printf 'skill-screen: unknown argument / 不明な引数: %s\n' "$1" >&2; usage >&2; exit 3 ;;
   esac
 done
 
 if [ -z "$target" ]; then
-  printf 'skill-screen: --target <dir> is required\n' >&2; usage >&2; exit 3
+  printf 'skill-screen: --target <dir> is required / --target <dir> は必須\n' >&2; usage >&2; exit 3
 fi
 
-# --- quarantine (opt-in): isolate FIRST, then scan the isolated copy ---
-# skill-screen never executes the target, so "quarantine" means containment, not a
-# sandbox: move the directory aside (out of any auto-load path) BEFORE inspecting it.
-# Default (no flag) is non-destructive — scan in place, read-only. A clean verdict
-# does NOT auto-promote a quarantined item; move it back yourself if you install it.
-# Fail-closed: if containment was requested but cannot be done (mkdir/mv fails, or
-# the destination exists), we exit 3 rather than silently scanning in place — the
-# whole point of asking for quarantine is to NOT leave the target where it was.
+# --- quarantine(opt-in): まず隔離し、その隔離コピーを走査する ---
+# skill-screen は target を実行しないので、"quarantine" はサンドボックスではなく封じ込め
+# を意味する: 検査の「前」にディレクトリを脇へ退避する(自動ロード経路の外へ)。
+# 既定(フラグなし)は非破壊 — その場で読み取り専用に走査する。clean な verdict でも
+# 隔離項目を自動で復帰させない; 導入するなら自分で戻すこと。
+# fail-closed: 封じ込めを要求されたのに実行できない(mkdir/mv 失敗、または退避先が
+# 既存)場合は、黙ってその場で走査せず exit 3 する — quarantine を求めた目的は
+# target を元の場所に「残さない」ことだから。
 if [ "$quarantine" = 1 ] && [ -d "$target" ]; then
   : "${quarantine_dir:=$PWD/quarantine}"
   dest="$quarantine_dir/$(basename -- "$target")"
   if [ -e "$dest" ]; then
-    printf 'skill-screen: quarantine destination already exists: %s\n' "$dest" >&2
+    printf 'skill-screen: quarantine destination already exists / 隔離先が既に存在: %s\n' "$dest" >&2
     printf '  refusing to overwrite an existing quarantined item.\n' >&2
+    printf '  既存の隔離済み項目を上書きしない。\n' >&2
     exit 3
   fi
   if ! mkdir -p "$quarantine_dir" 2>/dev/null; then
     printf 'skill-screen: could not create quarantine dir %s; refusing to scan uncontained (fail-closed)\n' "$quarantine_dir" >&2
+    printf '  隔離ディレクトリを作成できず; 未隔離での走査を拒否(fail-closed)。\n' >&2
     exit 3
   fi
   if mv -- "$target" "$dest" 2>/dev/null; then
     target="$dest"
     printf 'quarantined: moved to %s (scanning the isolated copy)\n' "$dest" >&2
+    printf '隔離済み: %s へ退避(隔離コピーを走査する)。\n' "$dest" >&2
     printf 'NOTE: quarantine is containment, not proof of malice. Review before deleting.\n' >&2
+    printf '注記: 隔離は封じ込めであり、悪意の証明ではない。削除前に確認すること。\n' >&2
   else
     printf 'skill-screen: quarantine move failed; refusing to scan uncontained (fail-closed)\n' >&2
+    printf '  隔離の移動に失敗; 未隔離での走査を拒否(fail-closed)。\n' >&2
     exit 3
   fi
 fi
@@ -477,24 +485,30 @@ trap 'rm -f "$json_out"' EXIT
 scan::run "$target" "$secret" "$json_out"
 signal="$SKC_SIGNAL"
 
-# --- output ---
+# --- 出力 / output ---
 if [ "$want_json" = 1 ]; then
   cat "$json_out"
 else
   printf 'skill-screen  verdict=%s\n' "$signal"
   case "$signal" in
-    no_signal)      printf '  No rule matched. This is NOT a proof of safety.\n' ;;
-    review_needed)  printf '  Warning-level matches. Read them before installing:\n' ;;
-    do_not_install) printf '  Blocked-level matches (or a scan red flag). Do not install as-is:\n' ;;
-    scan-error)     printf '  Could not scan the target (missing dir?).\n' ;;
+    no_signal)      printf '  ルールに一致なし。これは安全の証明では「ない」。\n'
+                    printf '  No rule matched. This is NOT a proof of safety.\n' ;;
+    review_needed)  printf '  warning レベルの一致あり。導入前に必ず確認すること:\n'
+                    printf '  Warning-level matches. Read them before installing:\n' ;;
+    do_not_install) printf '  blocked レベルの一致(または走査の危険信号)。そのままでは導入しないこと:\n'
+                    printf '  Blocked-level matches (or a scan red flag). Do not install as-is:\n' ;;
+    scan-error)     printf '  対象を走査できなかった(ディレクトリ不在?)。\n'
+                    printf '  Could not scan the target (missing dir?).\n' ;;
   esac
   if [ "$signal" = "review_needed" ] || [ "$signal" = "do_not_install" ]; then
     if command -v jq >/dev/null 2>&1; then
       jq -r '.hits[]? | "    [\(.severity)] \(.category)  \(.file):\(.line)"' "$json_out" 2>/dev/null | sort -u
       jq -r '.secret_hits[]? | "    [secret] \(.category)  \(.file):\(.line)  \(.masked)"' "$json_out" 2>/dev/null
     else
+      printf '    (一致ごとの内訳には jq を導入; 生出力は --json で実行)\n'
       printf '    (install jq for a per-hit breakdown; run with --json for raw output)\n'
     fi
+    printf '  次へ: この出力 + %s/stage2-interpret.md を LLM に渡して意図を判定する。\n' "$_self_dir"
     printf '  Next: hand this output + %s/stage2-interpret.md to an LLM for intent.\n' "$_self_dir"
   fi
 fi

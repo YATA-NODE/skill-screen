@@ -77,6 +77,18 @@ else
   say "FAIL  missing dir exit=$rc (expected 3)"; fail=$((fail+1))
 fi
 
+# bilingual human summary: the non-JSON verdict summary must print BOTH the JP and
+# the EN line. Guards the printf regression where a format string with no `%s`
+# silently drops its extra (EN) argument — the --json/content_hash checks above
+# cannot see human output, which is exactly how that bug slipped through once.
+human_out="$("$check" --target "$root/corpus/benign/normal-formatter" 2>/dev/null)"
+if printf '%s' "$human_out" | grep -q 'ルールに一致なし' \
+   && printf '%s' "$human_out" | grep -q 'No rule matched'; then
+  say "PASS  bilingual summary prints both JP and EN verdict lines"
+else
+  say "FAIL  bilingual summary missing a language (JP or EN verdict line)"; fail=$((fail+1))
+fi
+
 say ""
 say "RESULT: pass=$pass fail=$fail"
 [ "$fail" = 0 ]
