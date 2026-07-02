@@ -1,7 +1,120 @@
 # skill-screen
 
-> This README is in English for precision. Prefer Japanese? Run it through a machine
-> translator. (日本語が必要なら翻訳機にかけてください。精度のため英語で書いています。)
+> 日本語 → English(同じ内容を日本語・英語の順で記載 / same content, Japanese first then English)
+
+サードパーティ製の AI エージェント skill(Claude Code / OpenAI Codex 共通の `SKILL.md` 形式)を、
+インストール前にチェックする、ローカル完結・透明・**読み取り専用(read-only)** の安全スクリーン。
+skill 本体だけでなく、エージェントが読む指示ファイル(`SKILL.md` / `AGENTS.md` / `CLAUDE.md`)や
+スクリプトも含め、ディレクトリ内の全ファイルを検査します。スキャナ本体は単一スクリプト
+`skill-screen` 1 ファイルで、上から読めば「何を・どこで検査しているか」が分かります。
+**あなたのファイルを作成・移動・削除しません** — 読んで報告するだけです。
+ネットワーク送信なし・アカウント不要・テレメトリなし。
+
+## なぜ作ったか
+
+GitHub や gist で見つけた skill を `~/.claude/skills/` に入れる時点で、その `SKILL.md` と
+スクリプトに、あなたのエージェントができること全てを託すことになります。公式マーケット
+プレイスは自分たちの掲載物は審査しますが、自分で入れる skill を検査する仕組みは用意されて
+いません。`skill-screen` はその隙間を、3 つの意図的な性質で埋めます:
+
+- **ローカル完結** — skill をどこにも送信しません。全てあなたのマシン上で動きます。
+  アカウント不要・アップロードなし・テレメトリなし。
+- **読み取り専用(read-only)** — 対象の中に何も書き込まず、移動も削除もしません。
+  ダウンロードしたばかりの、まだ信用していないツールが黙ってフォルダを作ったり動かしたり
+  し始めたら、それ自体が危険信号のはず。隔離は *あなたの* 手動ステップです(使い方参照)—
+  ツールは決して代行しません。
+- **透明** — 検出ロジックの全ては単一ファイル `skill-screen` の **(1) DETECTION RULES** 節
+  (読める `grep` パターン)と、それを全ファイルに当てる **(2) INSPECTION** 節に書かれて
+  います。機械的ステージにモデルもブラックボックスもありません。ルールを変えたいときは
+  (1) を編集するだけです。
+
+要点は信頼です — 検出ルールは 1 ファイルで全部読め、スキルもメタデータも一切あなたの
+マシンの外に出ません。
+
+## 仕組み — 検査と解釈の分離
+
+1. **Stage 1(機械的、`grep`)** — `skill-screen` が対象ディレクトリを走査し、固定された
+   読めるルールセット(prompt-injection / 危険な振る舞い)を照合して、machine-readable な
+   JSON verdict を出力します。設計上 高 recall(候補を挙げるだけで、意図は判断しない)。
+2. **Stage 2(解釈、任意)** — Stage 1 の JSON と該当箇所の抜粋を、`SKILL.md` 内の
+   Stage 2 プロンプトと一緒に能力の高い LLM に渡す(または自分で読む)ことで、本物の攻撃と
+   「攻撃を *説明しているだけ* の skill」を切り分けます。プロンプトは skill をデータとして
+   扱い、その中の指示には従わないよう指示されています。
+
+### 何を検査するか(走査範囲)
+
+`SKILL.md` だけでなく、denylist 以外の全ファイルを走査します — skill 自身のスクリプト
+(`.sh` / `.py` / `.js` …)も含みます(`curl|bash` インストーラや認証情報の流出は、たいてい
+コード側に潜むため)。各 hit には `role`(`instruction` / `executable` / `other`)が拡張子
+だけで付与され、どのツールの指示ファイル名(`AGENTS.md`、`CLAUDE.md` …)も特別扱いしません。
+denylist ノイズ(`.git/` / `node_modules/` / `.env`)は除外、バイナリは hash 化のみで
+pattern 走査外(制限事項 参照)。
+
+### verdict(安全保証ではない)
+
+| verdict | 意味 |
+|---|---|
+| `no_signal` | どのパターンにも一致せず。安全の証明ではない — ルールが何も捕まえなかっただけ。 |
+| `review_needed` | warning レベルの一致あり。インストール前に読むこと。 |
+| `do_not_install` | blocked レベルの一致(instruction override、`curl\|bash` 等)。 |
+
+## インストール(agent skill として)
+
+`skill-screen` 自体が skill フォルダです。エージェントに自動で使わせるには:
+
+- このフォルダごと `~/.claude/skills/` に置く(`~/.claude/skills/skill-screen/SKILL.md` の
+  隣に `.../skill-screen` が並ぶ形)。
+- 既に自分の `SKILL.md` 運用がある場合は、この `SKILL.md` の本文を自分のものに追記し、
+  `skill-screen` スクリプトを隣に置くだけ。
+
+もちろんスクリプトを直接実行するだけでも使えます(インストール不要、下記 使い方)。
+
+## 使い方
+
+```sh
+./skill-screen --target /path/to/some-skill                       # 人間向けの判定
+./skill-screen --target /path/to/some-skill --json                # machine-readable な JSON
+./skill-screen --target /path/to/some-skill --include-secret-scan # 同梱認証情報も flag
+```
+
+**隔離ファースト(手動)**: 信用していない skill はダウンロードした場所(例 `~/Downloads/`)
+に置いたまま検査してください。検査を通るまで `~/.claude/skills/` に移動しないこと。ツールが
+代わりに動かすことはありません — 走査は読み取り専用です。
+
+日本語の warning パターンは**既定で適用**されます(中心読者が日本語のため。オプトイン不要)。
+
+### オプション
+
+| オプション | 意味 |
+|---|---|
+| `--target <dir>` | 検査する skill/拡張のディレクトリ(必須) |
+| `--include-secret-scan` | 同梱された認証情報もスキャン(出力ではマスク) |
+| `--json` | サマリでなく machine-readable な JSON を出力 |
+
+必要なもの: `bash`、`grep`、`sha256sum`、`timeout`(coreutils)。`jq` があれば JSON が整形
+される(なくても安全に degrade)。
+
+## 制限事項(必ず読むこと)
+
+`skill-screen` はスクリーンであって証明ではありません。設計上の既知の境界:
+
+- `no_signal` は「安全」ではない。走査した範囲でルールが一致しなかった、という意味。
+- バイナリは hash 化されるが pattern 走査されない。バイナリ blob に隠された payload は
+  テキストルールに一致しない(ただし `content_hash` には含まれる)。
+- 対象外へ逃げる symlink は、追従せず flag: `SKILL.md` が自ディレクトリ外を指す skill は、
+  読まずに `do_not_install` と報告。
+- Stage 1 は高 recall。攻撃を *説明しているだけ* の skill も flag する。意図と説明の
+  切り分けは Stage 2(LLM プロンプト)が行う。
+- パターン網羅は意図的に小さく、英語+日本語のみ。自分で読み切れるスクリーンは、読めない
+  巨大リストに勝る。
+
+## ライセンス
+
+[LICENSE](LICENSE)(MIT)を参照。第三者コードについて: [LICENSES.md](LICENSES.md)。
+
+---
+
+# English
 
 A local, transparent, **read-only** pre-install safety screen for third-party AI agent
 skills (Claude Code and OpenAI Codex — the shared `SKILL.md` format). It scans every file
@@ -44,11 +157,11 @@ metadata — ever leaves your machine.
 ### What it inspects (scan scope)
 
 Every non-denylisted file is scanned, not just `SKILL.md` — including the skill's own scripts
-(`.sh`, `.py`, `.js`, …), where a `curl|bash` installer or a credential exfil usually lives.
-Each hit gets a `role` (`instruction` / `executable` / `other`) by extension alone; no tool's
-instruction filename (`AGENTS.md`, `CLAUDE.md`, …) is special-cased. Denylisted noise
-(`.git/`, `node_modules/`, `.env`) is skipped; binaries are hashed but not pattern-scanned
-(see Limitations).
+(`.sh`, `.py`, `.js`, …), which are where a `curl|bash` installer or a credential exfil
+usually lives. Each hit gets a `role` (`instruction` / `executable` / `other`) by extension
+alone; no tool's instruction filename (`AGENTS.md`, `CLAUDE.md`, …) is special-cased.
+Denylisted noise (`.git/`, `node_modules/`, `.env`) is skipped; binaries are hashed but not
+pattern-scanned (see Limitations).
 
 ### Verdicts (not safety guarantees)
 
