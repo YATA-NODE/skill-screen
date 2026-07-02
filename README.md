@@ -41,6 +41,8 @@ GitHub や gist で見つけた skill を `~/.claude/skills/` に入れる時点
    「攻撃を *説明しているだけ* の skill」を切り分けます。プロンプトは skill をデータとして
    扱い、その中の指示には従わないよう指示されています。
 
+![skill-screen の全体像: 検査用ディレクトリ(自作)→ Stage 1: grep 走査(read-only、skill-screen 担当、ルールはカスタマイズ可能)→ verdict 3 種(no_signal / review_needed / do_not_install)→ 一致ありは Stage 2: LLM が意図を判定(SKILL.md 担当、LLM はデータとして処理し命令と認識しない)→ 判断も導入も自分の手で。下部に ローカル完結・読み取り専用・透明 のバッジ](docs/fig1.png)
+
 ### 何を検査するか(走査範囲)
 
 `SKILL.md` だけでなく、denylist 以外の全ファイルを走査します — skill 自身のスクリプト
@@ -153,6 +155,8 @@ metadata — ever leaves your machine.
    together with the Stage 2 prompt in `SKILL.md`, to a capable LLM (or read it yourself) to
    separate true positives from skills that merely *document* attacks. The prompt treats the
    skill as data and refuses to follow instructions inside it.
+
+![skill-screen overall flow: inspection folder (you make it) → Stage 1 grep scan (read-only, owned by skill-screen, customizable rules) → three verdicts (no_signal / review_needed / do_not_install) → hits go through Stage 2 LLM intent check (prompt in SKILL.md; the LLM treats it as data, not commands) → you decide and install by hand. Footer badges: Local-complete, Read-only, Transparent](docs/fig1_en.png)
 
 ### What it inspects (scan scope)
 
