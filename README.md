@@ -69,6 +69,21 @@ pattern 走査外(制限事項 参照)。
 - 既に自分の `SKILL.md` 運用がある場合は、この `SKILL.md` の本文を自分のものに追記し、
   `skill-screen` スクリプトを隣に置くだけ。
 
+配置例(グローバル skill として置いた後の形):
+
+```
+~/.claude/skills/
+└── skill-screen/
+    ├── SKILL.md       # エージェントの入口 + Stage 2 プロンプト(必須)
+    ├── skill-screen   # スキャナ本体スクリプト(必須。実行権限を保つ: chmod +x skill-screen)
+    ├── README.md      # このファイル(任意 — 人間向け説明)
+    ├── LICENSE        # 同梱推奨
+    └── LICENSES.md    # 同梱推奨
+```
+
+必須は `SKILL.md` と `skill-screen` の 2 ファイルだけです。`docs/`(README 用の図)は
+なくても動作に影響しません。
+
 もちろんスクリプトを直接実行するだけでも使えます(インストール不要、下記 使い方)。
 
 ## 使い方
@@ -183,6 +198,21 @@ pattern-scanned (see Limitations).
   `~/.claude/skills/skill-screen/SKILL.md` next to `.../skill-screen`).
 - Already have your own `SKILL.md` setup? Append this `SKILL.md`'s body to yours and keep
   the `skill-screen` script beside it.
+
+Example layout (after installing as a global skill):
+
+```
+~/.claude/skills/
+└── skill-screen/
+    ├── SKILL.md       # agent entry point + Stage 2 prompt (required)
+    ├── skill-screen   # the scanner script (required; keep it executable: chmod +x skill-screen)
+    ├── README.md      # this file (optional — for humans)
+    ├── LICENSE        # recommended to keep
+    └── LICENSES.md    # recommended to keep
+```
+
+Only two files are required: `SKILL.md` and `skill-screen`. `docs/` (README figures) is
+not needed at runtime.
 
 Or just run the script directly — it needs no installation (see Usage).
 
