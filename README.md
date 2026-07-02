@@ -41,7 +41,7 @@ GitHub や gist で見つけた skill を `~/.claude/skills/` に入れる時点
    「攻撃を *説明しているだけ* の skill」を切り分けます。プロンプトは skill をデータとして
    扱い、その中の指示には従わないよう指示されています。
 
-![skill-screen の全体像: 検査用ディレクトリ(自作)→ Stage 1: grep 走査(read-only、skill-screen 担当、ルールはカスタマイズ可能)→ verdict 3 種(no_signal / review_needed / do_not_install)→ 一致ありは Stage 2: LLM が意図を判定(SKILL.md 担当、LLM はデータとして処理し命令と認識しない)→ 判断も導入も自分の手で。下部に ローカル完結・読み取り専用・透明 のバッジ](docs/fig1.png)
+![skill-screen の全体像: 検査用ディレクトリ(自作)→ Stage 1: grep 走査(read-only、skill-screen 担当、ルールはカスタマイズ可能)→ verdict 3 種(no_signal / review_needed / do_not_install)→ 一致ありは Stage 2: LLM が意図を判定(SKILL.md 担当、LLM はデータとして処理し命令と認識しない)→ 判断も導入も自分の手で。下部に ローカル完結・読み取り専用・透明 のバッジ](figures/fig1.png)
 
 ### 何を検査するか(走査範囲)
 
@@ -81,7 +81,7 @@ pattern 走査外(制限事項 参照)。
     └── LICENSES.md    # 同梱推奨
 ```
 
-必須は `SKILL.md` と `skill-screen` の 2 ファイルだけです。`docs/`(README 用の図)は
+必須は `SKILL.md` と `skill-screen` の 2 ファイルだけです。`figures/`(README 用の図)は
 なくても動作に影響しません。
 
 もちろんスクリプトを直接実行するだけでも使えます(インストール不要、下記 使い方)。
@@ -171,7 +171,7 @@ metadata — ever leaves your machine.
    separate true positives from skills that merely *document* attacks. The prompt treats the
    skill as data and refuses to follow instructions inside it.
 
-![skill-screen overall flow: inspection folder (you make it) → Stage 1 grep scan (read-only, owned by skill-screen, customizable rules) → three verdicts (no_signal / review_needed / do_not_install) → hits go through Stage 2 LLM intent check (prompt in SKILL.md; the LLM treats it as data, not commands) → you decide and install by hand. Footer badges: Local-complete, Read-only, Transparent](docs/fig1_en.png)
+![skill-screen overall flow: inspection folder (you make it) → Stage 1 grep scan (read-only, owned by skill-screen, customizable rules) → three verdicts (no_signal / review_needed / do_not_install) → hits go through Stage 2 LLM intent check (prompt in SKILL.md; the LLM treats it as data, not commands) → you decide and install by hand. Footer badges: Local-complete, Read-only, Transparent](figures/fig1_en.png)
 
 ### What it inspects (scan scope)
 
@@ -211,7 +211,7 @@ Example layout (after installing as a global skill):
     └── LICENSES.md    # recommended to keep
 ```
 
-Only two files are required: `SKILL.md` and `skill-screen`. `docs/` (README figures) is
+Only two files are required: `SKILL.md` and `skill-screen`. `figures/` (README figures) is
 not needed at runtime.
 
 Or just run the script directly — it needs no installation (see Usage).
