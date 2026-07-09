@@ -80,7 +80,11 @@ EOF
 #   v3: パターン照合を case-insensitive 化(secret マーカーは case-sensitive のまま);
 #       remote-exec-indirect を追加; NUL 入りの指示/実行ファイルと同梱 credential
 #       ファイルを red flag 化; JSON に red_flags[] を追加
-patterns::schema_version() { echo "3"; }
+#   v4: NUL red flag を role 非依存化 — 既知バイナリ拡張子(画像/フォント/データ)だけを
+#       除外し、role=other の config/manifest/拡張子なしファイルに混ぜた NUL 隠蔽も捕捉する
+#       (v3 は instruction/executable 限定で、setup.conf 等が素通りしていた);
+#       同梱 credential ファイル名に .netrc / credentials / service-account.json 等を追加
+patterns::schema_version() { echo "4"; }
 
 # BLOCKED — 導入をブロックする。典型的な prompt-injection / リモートコード実行。
 # remote-exec は「取得して即シェルに流す」形(パイプ 1 段の寄り道まで許容)、
@@ -207,14 +211,37 @@ _skc_is_credential_file() {
     .env|.env.*) return 0 ;;
     *.pem|*.p12|*.pfx) return 0 ;;
     id_rsa|id_dsa|id_ecdsa|id_ed25519) return 0 ;;
+    # 認証情報「専用」の型のみ挙げる。secrets.yaml / secrets.json のような一般語は
+    # 正当な設定にも在りうるため、presence 直行(do_not_install)にはしない(FP を避ける)。
+    .netrc|.aws-credentials|credentials|credentials.json|service-account.json) return 0 ;;
+  esac
+  return 1
+}
+
+# _skc_is_binary <relpath> -> 既知の「本物のバイナリ」拡張子(画像/フォント/アーカイブ/
+# コンパイル済み/データ)なら 0。この種のファイルは NUL を含むのが当たり前なので、NUL の
+# 存在自体を red flag にしない(そうしないと .png を同梱しただけの skill を弾く false
+# positive になる)。逆に、ここに載らないファイル(拡張子なし / .conf / .yaml / .json /
+# .md / .sh …)は「テキストのはず」= NUL 混入は隠蔽の痕跡として red flag 対象にする。
+# 拡張子だけで判定する(中身は読まない、read-only・低コスト)。allowlist を保守的に保つ:
+# 未知の拡張子は「テキスト扱い」に倒す方が安全側(NUL があれば flag される)。
+_skc_is_binary() {
+  case "${1##*/}" in
+    *.png|*.jpg|*.jpeg|*.gif|*.webp|*.ico|*.bmp|*.tiff|*.pdf) return 0 ;;
+    *.woff|*.woff2|*.ttf|*.otf|*.eot) return 0 ;;
+    *.zip|*.gz|*.tar|*.tgz|*.bz2|*.xz|*.7z|*.rar|*.jar) return 0 ;;
+    *.wasm|*.so|*.dylib|*.dll|*.exe|*.o|*.a|*.class|*.pyc|*.pyo) return 0 ;;
+    *.bin|*.dat|*.db|*.sqlite|*.sqlite3|*.parquet|*.mo|*.npy|*.pkl|*.onnx|*.safetensors) return 0 ;;
+    *.mp3|*.mp4|*.wav|*.flac|*.ogg|*.webm|*.mov|*.avi|*.mkv) return 0 ;;
   esac
   return 1
 }
 
 # _skc_has_nul <file> -> ファイルが NUL バイトを含めば 0。
-# `grep -I` は NUL を見た時点でそのファイルの中身を一切見ない。指示文や実行スクリプトに
-# NUL を 1 個混ぜるだけで全パターンを回避できてしまうため、role が instruction/executable
-# のファイルでは NUL の存在自体を red flag にする(正当な skill は NUL を含まない)。
+# `grep -I` は NUL を見た時点でそのファイルの中身を一切見ない。テキストであるはずの
+# ファイルに NUL を 1 個混ぜるだけで全パターンを回避できてしまう。role で絞らず、
+# _skc_is_binary が false の全走査ファイル(config / manifest / 拡張子なし / 指示文 /
+# スクリプト等)で NUL の存在自体を red flag にする(正当な skill は NUL を含まない)。
 # bash 変数は NUL を保持できない($'\0' 直書き比較や $(cat f) は黙って NUL を落とす)ので、
 # NUL 以外を捨てて(tr -cd)残ったバイト数を数える — NUL は tr|wc の中に留まり変数に入らない。
 # wc の出力は環境により空白を伴うため除去してから比較する。
@@ -431,12 +458,13 @@ scan::run() {
     role="$(_skc_role "$rel")"
 
     # `grep -I` は NUL を 1 個見ただけでファイルの中身を読まない = NUL 混入で全パターンを
-    # 回避できる。指示文/実行スクリプトに NUL は要らないので、存在自体を red flag にする
-    # (純データは従来どおり hash のみ)。
-    case "$role" in
-      instruction|executable)
-        _skc_has_nul "$dir/$rel" && _skc_red_flag nul-in-file "$rel" ;;
-    esac
+    # 回避できる。テキストであるはずのファイル(既知バイナリ拡張子でない全ファイル)は
+    # NUL の存在自体を red flag にする。role=other の config/manifest/拡張子なしも対象に
+    # 含める(v3 の instruction/executable 限定では setup.conf 等が素通りしていた)。
+    # 本物のバイナリ(画像/フォント/データ)は NUL を含むのが当然なので除外 = hash のみ。
+    if ! _skc_is_binary "$rel"; then
+      _skc_has_nul "$dir/$rel" && _skc_red_flag nul-in-file "$rel"
+    fi
 
     while IFS= read -r entry; do
       [ -z "$entry" ] && continue
