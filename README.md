@@ -49,8 +49,20 @@ GitHub や gist で見つけた skill を `~/.claude/skills/` に入れる時点
 (`.sh` / `.py` / `.js` …)も含みます(`curl|bash` インストーラや認証情報の流出は、たいてい
 コード側に潜むため)。各 hit には `role`(`instruction` / `executable` / `other`)が拡張子
 だけで付与され、どのツールの指示ファイル名(`AGENTS.md`、`CLAUDE.md` …)も特別扱いしません。
-denylist ノイズ(`.git/` / `node_modules/` / `.env`)は除外、バイナリは hash 化のみで
-pattern 走査外(制限事項 参照)。
+denylist ノイズ(`.git/` / `node_modules/` / `.venv/`)は除外、バイナリは hash 化のみで
+pattern 走査外(制限事項 参照)。パターン照合は**大文字小文字を区別しません**(`Ignore all
+previous instructions` のような文頭大文字を取り逃さないため)。認証情報マーカーだけは、
+トークンの文字形式そのものが大小に依存するため区別して照合します。
+
+さらに、**一致行を持たない危険信号(red flag)** も報告します。いずれも単独で
+`do_not_install` になり、`red_flags[]` に理由とファイル名が載ります:
+
+| red flag | 意味 |
+|---|---|
+| `shipped-credential-file` | skill が認証情報ファイル(`.env` / `*.pem` / `id_rsa` / `*.p12` …)を同梱している。**中身は読まずに、存在だけで** flag する(意図的挙動)。`.env.example` 等の値を書かないテンプレは除外し、通常ファイルとして走査する。 |
+| `nul-in-file` | 指示文/実行スクリプトに NUL バイトが在る。`grep` が中身を一切読まなくなるため、走査そのものを回避する手口。正当な skill の指示文やスクリプトに NUL は要らない。 |
+| `symlink-escape` | 対象ディレクトリの外を指す symlink。追従せず flag する。 |
+| `bad-filename` | ファイル名に制御文字が含まれる。 |
 
 ### verdict(安全保証ではない)
 
@@ -58,7 +70,7 @@ pattern 走査外(制限事項 参照)。
 |---|---|
 | `no_signal` | どのパターンにも一致せず。安全の証明ではない — ルールが何も捕まえなかっただけ。 |
 | `review_needed` | warning レベルの一致あり。インストール前に読むこと。 |
-| `do_not_install` | blocked レベルの一致(instruction override、`curl\|bash` 等)。 |
+| `do_not_install` | blocked レベルの一致(instruction override、`curl\|bash` 等)、または走査の危険信号(上表の red flag)。 |
 
 ## インストール(agent skill として)
 
@@ -120,6 +132,15 @@ pattern 走査外(制限事項 参照)。
   テキストルールに一致しない(ただし `content_hash` には含まれる)。
 - 対象外へ逃げる symlink は、追従せず flag: `SKILL.md` が自ディレクトリ外を指す skill は、
   読まずに `do_not_install` と報告。
+- リモート実行の検出は、**1 行に素直に書かれた形**だけを見る(`curl … | bash`、`curl -o … && sh …`、
+  `eval "$(curl …)"`、`bash <(curl …)`)。難読化(base64・文字列分割・変数経由)や、取得と実行を
+  複数行・複数ファイルに分けた形は一致しない。
+- 認証情報ファイルの同梱は、中身に依らず `do_not_install`。公開証明書を `cert.pem` として同梱する
+  ような正当な skill もここで止まる — 意図した保守側の挙動(存在自体を疑う)。
+- NUL の red flag が捉えるのは「`grep` を盲目にした痕跡」であって、走査回避の全てではない。
+  NUL を含まないのに `grep` がバイナリと判断するファイルは、依然として中身を読まれない。
+- 読まずに flag したファイル(認証情報ファイル / 対象外へ逃げる symlink / 制御文字名)は
+  `content_hash` に含まれない。`content_hash` は走査したものの識別子であって、対象全体の指紋ではない。
 - Stage 1 は高 recall。攻撃を *説明しているだけ* の skill も flag する。意図と説明の
   切り分けは Stage 2(LLM プロンプト)が行う。
 - パターン網羅は意図的に小さく、英語+日本語のみ。自分で読み切れるスクリーンは、読めない
@@ -179,8 +200,21 @@ Every non-denylisted file is scanned, not just `SKILL.md` — including the skil
 (`.sh`, `.py`, `.js`, …), which are where a `curl|bash` installer or a credential exfil
 usually lives. Each hit gets a `role` (`instruction` / `executable` / `other`) by extension
 alone; no tool's instruction filename (`AGENTS.md`, `CLAUDE.md`, …) is special-cased.
-Denylisted noise (`.git/`, `node_modules/`, `.env`) is skipped; binaries are hashed but not
-pattern-scanned (see Limitations).
+Denylisted noise (`.git/`, `node_modules/`, `.venv/`) is skipped; binaries are hashed but not
+pattern-scanned (see Limitations). Pattern matching is **case-insensitive**, so a
+sentence-cased `Ignore all previous instructions` cannot slip through. Credential markers are
+the one exception: they are matched case-sensitively, because a token's character shape is
+part of what identifies it.
+
+The scanner also reports **red flags — signals with no matching line**. Any one of them alone
+yields `do_not_install`, and each appears in `red_flags[]` with a reason and a filename:
+
+| red flag | meaning |
+|---|---|
+| `shipped-credential-file` | The skill ships a credential file (`.env`, `*.pem`, `id_rsa`, `*.p12`, …). It is flagged **on presence alone, without reading its contents** (deliberate). Value-less templates such as `.env.example` are exempt and scanned as ordinary files. |
+| `nul-in-file` | An instruction or executable file contains a NUL byte, which makes `grep` skip its contents entirely — a way to evade the scan itself. A legitimate skill's prose and scripts have no reason to contain one. |
+| `symlink-escape` | A symlink points outside the target directory. It is flagged, never followed. |
+| `bad-filename` | A filename contains control characters. |
 
 ### Verdicts (not safety guarantees)
 
@@ -188,7 +222,7 @@ pattern-scanned (see Limitations).
 |---|---|
 | `no_signal` | no patterns matched. Not a proof of safety — just nothing the rules caught. |
 | `review_needed` | warning-level matches; read them before installing. |
-| `do_not_install` | blocked-level matches (instruction override, `curl\|bash`, etc.). |
+| `do_not_install` | blocked-level matches (instruction override, `curl\|bash`, etc.), or a scan red flag (table above). |
 
 ## Install (as an agent skill)
 
@@ -251,6 +285,17 @@ JSON output; without it the tool degrades safely.
   be matched by the text rules (it is still part of `content_hash`).
 - Symlinks that escape the target are flagged, not followed: a skill whose `SKILL.md` points
   outside its own directory is reported as `do_not_install` rather than read.
+- Remote-execution detection only sees the **plainly written, single-line forms** (`curl … | bash`,
+  `curl -o … && sh …`, `eval "$(curl …)"`, `bash <(curl …)`). Obfuscation (base64, split strings,
+  indirection through variables) and fetch-then-run split across lines or files will not match.
+- A shipped credential file is `do_not_install` regardless of its contents. A legitimate skill
+  that bundles a public certificate as `cert.pem` is stopped here too — the conservative
+  behavior is intended: the presence itself is what is suspect.
+- The NUL red flag catches the *trace* of a scanner being blinded, not every way to evade it.
+  A file that `grep` treats as binary without containing a NUL byte still goes unread.
+- Files flagged without being read (credential files, escaping symlinks, control-character
+  names) are not part of `content_hash`. That hash identifies what was scanned; it is not a
+  fingerprint of the whole target.
 - Stage 1 is high-recall. It flags skills that merely *document* attacks too; Stage 2 (the
   LLM prompt) separates intent from documentation.
 - Pattern coverage is intentionally small and English/Japanese only. A screen you can fully

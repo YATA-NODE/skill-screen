@@ -77,13 +77,22 @@ EOF
 # 判定に使う)。
 #   v1 (initial): EN blocked 3 + EN warning 5 + JP warning 4(JP は opt-in)
 #   v2: JP warning を既定適用; JSON 出力から "profile" フィールドを削除
-patterns::schema_version() { echo "2"; }
+#   v3: パターン照合を case-insensitive 化(secret マーカーは case-sensitive のまま);
+#       remote-exec-indirect を追加; NUL 入りの指示/実行ファイルと同梱 credential
+#       ファイルを red flag 化; JSON に red_flags[] を追加
+patterns::schema_version() { echo "3"; }
 
 # BLOCKED — 導入をブロックする。典型的な prompt-injection / リモートコード実行。
+# remote-exec は「取得して即シェルに流す」形(パイプ 1 段の寄り道まで許容)、
+# remote-exec-indirect は「落としてから同一行で実行 / eval / プロセス置換」の形。
+# いずれも 1 行の素直な書き方だけを見る: 難読化(base64・文字列分割・変数経由)は
+# 意図的に範囲外(制限事項 参照)。行連結は `&&` / `;` に限り、`||`(失敗時の
+# フォールバック)は一致させない。
 SKC_BLOCKED_PATTERNS=(
   'instruction-override|blocked|(ignore|disregard) (all |any )?(previous|prior|above|earlier) (instruction|prompt|direction|rule)|forget (everything|all|your) (prior|previous|instruction|rule)|override (the )?(system|previous|prior) (prompt|instruction)'
   'role-change|blocked|you are now (an?|the)|act as (an?|the|if)|pretend (to be|you are)|from now on,? you (are|will|must|should)|disregard your (role|persona|identity|instruction)'
-  'remote-exec|blocked|(curl|wget)[^|]*\|[[:space:]]*(sudo[[:space:]]+)?(sh|bash|zsh)([[:space:]]|$)'
+  'remote-exec|blocked|(curl|wget)[^|]*\|([[:space:]]*[[:alnum:]_][^|]*\|)?[[:space:]]*(sudo[[:space:]]+)?(sh|bash|zsh)([[:space:]]|$)'
+  'remote-exec-indirect|blocked|(curl|wget).*(-o|-O|>).*(&&|;)[[:space:]]*(sudo[[:space:]]+)?(sh|bash|zsh)([[:space:]]|$)|eval[[:space:]]+.*(curl|wget)|(sh|bash|zsh)[[:space:]]+<\([[:space:]]*(curl|wget)'
 )
 
 # WARNING (English) — 正当な用途も在りうる; 人間が読むために炙り出す。
@@ -146,16 +155,24 @@ patterns::category_count() {
 # (2) INSPECTION(照合)— 上のルールに全ファイルを照合する唯一の grep
 # ============================================================================
 
-# _skc_grep <regex> <file> -> 一致した "line:content" 行をグローバル _SKC_MATCHES
+# _skc_grep <regex> <file> [<ci>] -> 一致した "line:content" 行をグローバル _SKC_MATCHES
 # (改行区切り、無ければ空)に取り込み、timeout を立てる。パターン走査と secret 走査の
 # 両ループで共有し、grep+timeout+rc124 の骨格を 1 箇所に集約する。
+# ci=1 で大小を無視して照合する(injection / role / remote-exec / warning 用: 文頭は
+# 普通に大文字になるため、`Ignore all previous instructions` が素通りしていた)。
+# 既定の ci=0 は大小を区別する — secret マーカー(AKIA / ghp_ / sk_live_ / PEM …)は
+# 文字形式そのものが大小に依存するので、そこへ -i を波及させてはならない。
+# 注意: 「検出パターンは常に -i で安全」ではない。suspicious-url の base64 断片
+# (`aHR0c`)のように大小に意味があるものは -i で FP が増える — warning なら許容だが、
+# 大小依存のパターンを blocked へ足すときは、ここの分岐を見直すこと。
 # command substitution を介さずに呼ぶこと: `_skc_grep ...` は現在のシェルで走るので
 # SKC_INCOMPLETE=1(fail-closed の timeout フラグ)が呼び出し側に残る。
 # `$(_skc_grep ...)` 形式だとサブシェルで走り、この代入が黙って捨てられ fail-closed が
 # 壊れる。grep 内部の $() は内部用で副作用は無い。
 _skc_grep() {
-  local rc
-  _SKC_MATCHES="$(timeout "$SKC_GREP_TIMEOUT" grep -nIE -- "$1" "$2" 2>/dev/null)"; rc=$?
+  local rc flags="-nIE"
+  [ "${3:-0}" = 1 ] && flags="-niIE"
+  _SKC_MATCHES="$(timeout "$SKC_GREP_TIMEOUT" grep "$flags" -- "$1" "$2" 2>/dev/null)"; rc=$?
   [ "$rc" -eq 124 ] && SKC_INCOMPLETE=1
 }
 
@@ -167,23 +184,60 @@ SKC_MATCH_CAP="${SKC_MATCH_CAP:-20}"        # file+pattern ごとに記録する
 SKC_GREP_TIMEOUT="${SKC_GREP_TIMEOUT:-15}"  # grep 1 回あたりの秒数
 SKC_EXCERPT_MAX="${SKC_EXCERPT_MAX:-200}"   # 一致行から保持する最大文字数
 
-# 走査もハッシュもしないディレクトリ/ファイル(ノイズ + secret、多層防御)。
+# 走査もハッシュもしないノイズ(ベンダ物・ビルド成果物)。
 _skc_is_denied() {
   case "$1" in
     .git/*|*/.git/*|.git) return 0 ;;
     node_modules/*|*/node_modules/*) return 0 ;;
     .venv/*|*/.venv/*|__pycache__/*|*/__pycache__/*) return 0 ;;
     *.pyc) return 0 ;;
-    .env|.env.*|*/.env|*/.env.*) return 0 ;;
   esac
   return 1
 }
 
+# _skc_is_credential_file <relpath> -> 認証情報を入れる「型」のファイル名なら 0。
+# skill が認証情報ファイルを同梱していること自体が、中身に依らず危険信号(red flag)。
+# 中身は決して読まない — 存在だけで do_not_install にし、走査も hash もしない
+# (対象の .env を読まないという配慮を保ったまま、shipped-secret の穴を塞ぐ)。
+# `.env.example` 系(値を書かない慣習のテンプレ)は red flag にせず、通常ファイルとして
+# 走査する: 本物の鍵をそこに置いても --include-secret-scan で捕まる。
+_skc_is_credential_file() {
+  case "${1##*/}" in                                   # basename で照合する
+    .env.example|.env.sample|.env.template|.env.dist) return 1 ;;
+    .env|.env.*) return 0 ;;
+    *.pem|*.p12|*.pfx) return 0 ;;
+    id_rsa|id_dsa|id_ecdsa|id_ed25519) return 0 ;;
+  esac
+  return 1
+}
+
+# _skc_has_nul <file> -> ファイルが NUL バイトを含めば 0。
+# `grep -I` は NUL を見た時点でそのファイルの中身を一切見ない。指示文や実行スクリプトに
+# NUL を 1 個混ぜるだけで全パターンを回避できてしまうため、role が instruction/executable
+# のファイルでは NUL の存在自体を red flag にする(正当な skill は NUL を含まない)。
+# bash 変数は NUL を保持できない($'\0' 直書き比較や $(cat f) は黙って NUL を落とす)ので、
+# NUL 以外を捨てて(tr -cd)残ったバイト数を数える — NUL は tr|wc の中に留まり変数に入らない。
+# wc の出力は環境により空白を伴うため除去してから比較する。
+_skc_has_nul() {
+  local n
+  [ -r "$1" ] || return 1
+  n="$(LC_ALL=C tr -cd '\000' < "$1" 2>/dev/null | LC_ALL=C wc -c)" || return 1
+  n="${n//[[:space:]]/}"
+  [ "${n:-0}" -gt 0 ]
+}
+
+# _skc_red_flag <reason> <relpath> — 走査の危険信号を 1 行記録する(reason US path)。
+# 一致行を持たない検出(回避の痕跡・同梱認証情報)はここに載る。ファイルへ追記するのは
+# scan::list_files がサブシェルで走りうるため(親のグローバル変数は設定できない)。
+# reason は固定リテラル、path は sanitize 済み(制御文字を落とし secret をマスクする)。
+_skc_red_flag() {
+  [ -n "${SKC_REDFLAG_FILE:-}" ] || return 0
+  printf '%s\037%s\n' "$1" "$(_skc_sanitize "$2")" >> "$SKC_REDFLAG_FILE"
+}
+
 # scan::list_files <dir> -> 相対パスを 1 行ずつ出力する(denylist 適用済み)。
-# $(...) / <(...) で使うとサブシェルで走るため、親のグローバルを設定できない。
-# 代わりに、SKC_BADNAME_FLAG がファイルを指していれば、制御文字(や埋め込み改行)を
-# 含むパスを見るたびそこへ 1 バイト追記する — 走査後に呼び出し側が確認する回避の
-# 危険信号(red flag)。
+# 走査対象から外す 3 経路で red flag を立てる: 制御文字を含むファイル名 / 対象外へ脱出する
+# symlink / 同梱された認証情報ファイル。いずれも「読まずに」flag する。
 scan::list_files() {
   local dir="$1" rel real base
   # symlink も含める(-type l): SKILL.md が target の「外」を指す symlink である skill は、
@@ -195,9 +249,14 @@ scan::list_files() {
     rel="${rel#./}"
     [ -z "$rel" ] && continue
     _skc_is_denied "$rel" && continue
+    # 認証情報ファイルは最初に落とす: 存在だけで red flag、中身は決して読まない。
+    if _skc_is_credential_file "$rel"; then
+      _skc_red_flag shipped-credential-file "$rel"
+      continue
+    fi
     case "$rel" in
       *[$'\001'-$'\037']*)
-        [ -n "${SKC_BADNAME_FLAG:-}" ] && printf 1 >> "$SKC_BADNAME_FLAG"
+        _skc_red_flag bad-filename "$rel"
         continue ;;
     esac
     if [ -L "$dir/$rel" ]; then
@@ -209,7 +268,7 @@ scan::list_files() {
       if [ -n "$real" ] && { [ "$real" = "$base" ] || case "$real" in "$base"/*) true ;; *) false ;; esac; }; then
         [ -f "$dir/$rel" ] && printf '%s\n' "$rel"   # in-tree の通常ファイル: 走査する
       else
-        [ -n "${SKC_BADNAME_FLAG:-}" ] && printf 1 >> "$SKC_BADNAME_FLAG"  # target の外へ脱出
+        _skc_red_flag symlink-escape "$rel"          # target の外へ脱出
       fi
       continue
     fi
@@ -285,15 +344,15 @@ _skc_role() {
 
 
 # _skc_emit_json <dir> <content_hash> <files> <patterns> <signal>
-#                <hits_tmp> <secret_tmp>  -> JSON を stdout に出力する。
+#                <hits_tmp> <secret_tmp> <redflag_tmp>  -> JSON を stdout に出力する。
 # jq があれば使う; 無ければ最小限の(それでも妥当な)degraded オブジェクトを出力する。
 _skc_emit_json() {
   local dir="$1" chash="$2" files="$3" pcount="$4" signal="$5"
-  local hits_tmp="$6" secret_tmp="$7"
+  local hits_tmp="$6" secret_tmp="$7" redflag_tmp="$8"
   local ts; ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)"
 
   if command -v jq >/dev/null 2>&1; then
-    local hits_json secret_json
+    local hits_json secret_json redflag_json
     hits_json="$(jq -R -s '
       split("\n") | map(select(length>0)) | map(split(""))
       | map({category:.[0], severity:.[1], file:.[2],
@@ -301,21 +360,28 @@ _skc_emit_json() {
     secret_json="$(jq -R -s '
       split("\n") | map(select(length>0)) | map(split(""))
       | map({category:.[0], file:.[1], line:((.[2]|tonumber?) // .[2]), masked:.[3]})' "$secret_tmp")"
+    # 一致行を持たない検出。同じ理由が複数ファイルに立つので unique で畳む。
+    # 区切りは hits / secret と同じ US バイト。
+    redflag_json="$(jq -R -s '
+      split("\n") | map(select(length>0)) | map(split(""))
+      | map({reason:.[0], file:.[1]}) | unique' "$redflag_tmp")"
     jq -n \
       --arg sv "$(patterns::schema_version)" --arg td "$dir" \
       --arg ch "$chash" --argjson fs "${files:-0}" --argjson pc "${pcount:-0}" \
       --arg sig "$signal" --argjson hits "$hits_json" --argjson secrets "$secret_json" \
-      --arg ts "$ts" \
+      --argjson flags "$redflag_json" --arg ts "$ts" \
       '{schema_version:$sv, tool:"skill-screen", target_dir:$td,
         content_hash:$ch, files_scanned:$fs, pattern_count:$pc,
-        candidate_signal:$sig, hits:$hits, secret_hits:$secrets, scanned_at:$ts}'
+        candidate_signal:$sig, hits:$hits, secret_hits:$secrets,
+        red_flags:$flags, scanned_at:$ts}'
   else
     # degraded 経路: jq なし。件数のみで一致ごとの詳細は出さない(それでも妥当な JSON)。
     # grep -c は無一致時に "0" を出力して exit 1 する; `|| true` はその "0" を保ち、もう
     # 一つ足さない(以前の `|| echo 0` は余分な "0\n0" を生んでいた)。
-    local nhits nsec dir_esc
+    local nhits nsec nflag dir_esc
     nhits="$(grep -c . "$hits_tmp" 2>/dev/null || true)"; nhits="${nhits:-0}"
     nsec="$(grep -c . "$secret_tmp" 2>/dev/null || true)"; nsec="${nsec:-0}"
+    nflag="$(grep -c . "$redflag_tmp" 2>/dev/null || true)"; nflag="${nflag:-0}"
     # target_dir は操作者が制御する; \ と " をエスケープし制御文字を落とすことで、
     # 細工したディレクトリ名がこの手組み経路の JSON を壊せないようにする。
     dir_esc="$(printf '%s' "$dir" | tr -d '\000-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
@@ -325,6 +391,7 @@ _skc_emit_json() {
       "$chash" "${files:-0}" "${pcount:-0}"
     printf '"candidate_signal":"%s","hits_count":%s,"secret_hits_count":%s,' \
       "$signal" "$nhits" "$nsec"
+    printf '"red_flags_count":%s,' "$nflag"
     printf '"degraded":"jq not found: counts only","scanned_at":"%s"}\n' "$ts"
   fi
 }
@@ -338,17 +405,18 @@ scan::run() {
   SKC_INCOMPLETE=0
 
   if [ ! -d "$dir" ]; then
-    _skc_emit_json "$dir" "sha256:unavailable" 0 0 "scan-error" /dev/null /dev/null > "$out"
+    _skc_emit_json "$dir" "sha256:unavailable" 0 0 "scan-error" \
+      /dev/null /dev/null /dev/null > "$out"
     return 0
   fi
 
   local hits_tmp secret_tmp files_tmp
   hits_tmp="$(mktemp)"; secret_tmp="$(mktemp)"; files_tmp="$(mktemp)"
-  SKC_BADNAME_FLAG="$(mktemp)"
+  SKC_REDFLAG_FILE="$(mktemp)"
   # どの return 経路でも全 temp を掃除する。mktemp 群の「後」に設定するので、上の
   # dir 不在の早期 return(temp がまだ存在しない時点で走る)では発火しない。関数内で
   # 設定した RETURN trap は関数スコープ(functrace なし)= 呼び出し側に漏れない(verified)。
-  trap 'rm -f "$hits_tmp" "$secret_tmp" "$files_tmp" "$SKC_BADNAME_FLAG"' RETURN
+  trap 'rm -f "$hits_tmp" "$secret_tmp" "$files_tmp" "$SKC_REDFLAG_FILE"' RETURN
 
   # ディレクトリの走査は厳密に 1 回だけ; キャッシュしたリストをファイル数・content
   # hash・走査ループで再利用する(以前は別々に 3 回走査していた)。
@@ -360,17 +428,26 @@ scan::run() {
 
   local rel entry category rest severity regex line content excerpt role
   while IFS= read -r rel; do
+    role="$(_skc_role "$rel")"
+
+    # `grep -I` は NUL を 1 個見ただけでファイルの中身を読まない = NUL 混入で全パターンを
+    # 回避できる。指示文/実行スクリプトに NUL は要らないので、存在自体を red flag にする
+    # (純データは従来どおり hash のみ)。
+    case "$role" in
+      instruction|executable)
+        _skc_has_nul "$dir/$rel" && _skc_red_flag nul-in-file "$rel" ;;
+    esac
+
     while IFS= read -r entry; do
       [ -z "$entry" ] && continue
       category="${entry%%|*}"; rest="${entry#*|}"
       severity="${rest%%|*}"; regex="${rest#*|}"
-      _skc_grep "$regex" "$dir/$rel"
+      _skc_grep "$regex" "$dir/$rel" 1     # ci=1: 文頭の大文字化で素通りさせない
       [ -z "$_SKC_MATCHES" ] && continue
       printf '%s\n' "$_SKC_MATCHES" | head -n "$SKC_MATCH_CAP" | while IFS= read -r m; do
         [ -z "$m" ] && continue
         line="${m%%:*}"; content="${m#*:}"
         excerpt="$(_skc_sanitize "$content")"
-        role="$(_skc_role "$rel")"
         printf '%s\037%s\037%s\037%s\037%s\037%s\n' \
           "$category" "$severity" "$rel" "$line" "$role" "$excerpt" >> "$hits_tmp"
       done
@@ -380,7 +457,7 @@ scan::run() {
       while IFS= read -r entry; do
         [ -z "$entry" ] && continue
         category="${entry%%|*}"; rest="${entry#*|}"; regex="${rest#*|}"
-        _skc_grep "$regex" "$dir/$rel"
+        _skc_grep "$regex" "$dir/$rel"        # ci=0: トークン形式は大小に依存する
         [ -z "$_SKC_MATCHES" ] && continue
         printf '%s\n' "$_SKC_MATCHES" | head -n "$SKC_MATCH_CAP" | while IFS= read -r m; do
           [ -z "$m" ] && continue
@@ -406,7 +483,7 @@ scan::run() {
   fi
   local signal="no_signal"
   if [ -s "$secret_tmp" ] || [ "$has_blocked" = 1 ] \
-     || [ "$SKC_INCOMPLETE" = 1 ] || [ -s "$SKC_BADNAME_FLAG" ]; then
+     || [ "$SKC_INCOMPLETE" = 1 ] || [ -s "$SKC_REDFLAG_FILE" ]; then
     signal="do_not_install"
   elif [ -s "$hits_tmp" ]; then
     signal="review_needed"
@@ -414,7 +491,7 @@ scan::run() {
   SKC_SIGNAL="$signal"
 
   _skc_emit_json "$dir" "$content_hash" "$files_scanned" \
-    "$pattern_count" "$signal" "$hits_tmp" "$secret_tmp" > "$out"
+    "$pattern_count" "$signal" "$hits_tmp" "$secret_tmp" "$SKC_REDFLAG_FILE" > "$out"
   # temp はこの関数冒頭で設定した RETURN trap が削除する。
 }
 
@@ -463,6 +540,9 @@ else
   esac
   if [ "$signal" = "review_needed" ] || [ "$signal" = "do_not_install" ]; then
     if command -v jq >/dev/null 2>&1; then
+      # red flag は一致行を持たない(回避の痕跡・同梱認証情報)。先に出さないと
+      # do_not_install なのに理由が 1 行も出ない、という読めない出力になる。
+      jq -r '.red_flags[]? | "    [red-flag] \(.reason)  \(.file)"' "$json_out" 2>/dev/null
       jq -r '.hits[]? | "    [\(.severity)] \(.category)  \(.file):\(.line)"' "$json_out" 2>/dev/null | sort -u
       jq -r '.secret_hits[]? | "    [secret] \(.category)  \(.file):\(.line)  \(.masked)"' "$json_out" 2>/dev/null
     else
